@@ -1544,25 +1544,53 @@ function bringForward() {
 }
 
 function sendToBack() {
-  const ordered = getSelectedInDOMOrder();
-  ordered.reverse().forEach(el =>
-    contentLayer.insertBefore(el, contentLayer.firstChild)
-  );
-
-  drawSelectionBoxes();
+    if (!selectedElements.length) return;
+    
+    // Get the actual path/shape elements from the selection rectangles
+    const contentChildren = Array.from(contentLayer.children);
+    
+    selectedElements.forEach(selectionRect => {
+        // Find the actual element this selection rectangle represents
+        const targetId = selectionRect.dataset.targetId;
+        if (targetId) {
+            const actualElement = contentLayer.querySelector(`[data-layer-id="${targetId}"]`);
+            if (actualElement && actualElement.parentNode === contentLayer) {
+                // Move actual element to back
+                contentLayer.insertBefore(actualElement, contentChildren[0]);
+            }
+        }
+    });
+    
+    // Update selection rectangles after moving elements
+    drawSelectionBoxes();
 }
 
 function sendBackward() {
-  const ordered = getSelectedInDOMOrder();
-
-  ordered.forEach(el => {
-    const prev = el.previousSibling;
-    if (prev) {
-      contentLayer.insertBefore(el, prev);
-    }
-  });
-
-  drawSelectionBoxes();
+    if (!selectedElements.length) return;
+    
+    const contentChildren = Array.from(contentLayer.children);
+    
+    // Process from top to bottom to maintain order
+    const selectionsWithIndex = selectedElements
+        .map(selectionRect => {
+            const targetId = selectionRect.dataset.targetId;
+            const actualElement = targetId ? 
+                contentLayer.querySelector(`[data-layer-id="${targetId}"]`) : null;
+            return { selectionRect, actualElement, 
+                     index: actualElement ? contentChildren.indexOf(actualElement) : -1 };
+        })
+        .filter(item => item.actualElement && item.index > -1)
+        .sort((a, b) => b.index - a.index); // Topmost first
+    
+    selectionsWithIndex.forEach(({ actualElement, index }) => {
+        if (index > 0) {
+            // Move element down by one position
+            const elementBelow = contentChildren[index - 1];
+            contentLayer.insertBefore(actualElement, elementBelow);
+        }
+    });
+    
+    drawSelectionBoxes();
 }
 
 /* ----------------------------------------------------------------------------- */
