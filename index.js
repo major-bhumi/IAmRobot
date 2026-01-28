@@ -1544,11 +1544,20 @@ function bringForward() {
 }
 
 function sendToBack() {
+  console.log('=== sendToBack called ===');
+  
+  // Show before state
+  console.log('BEFORE:', Array.from(contentLayer.children).map(el => 
+    el.id || el.tagName
+  ));
   const ordered = getSelectedInDOMOrder();
   ordered.reverse().forEach(el =>
     contentLayer.insertBefore(el, contentLayer.firstChild)
   );
-
+  // Show after state  
+  console.log('AFTER:', Array.from(contentLayer.children).map(el => 
+    el.id || el.tagName
+  ));
   drawSelectionBoxes();
 }
 
