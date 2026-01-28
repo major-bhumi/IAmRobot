@@ -21,6 +21,11 @@ let selectedAnchorIndex = null;
 
 const MIN_DRAW_DISTANCE = 32; // tweak: 4–8 feels good
 
+// History stacks
+let undoStack = [];
+let redoStack = [];
+const MAX_HISTORY = 50; // limit for memory
+
 /* ----------------------------------------------------------------------------- */
 /* ---------------------------------- Context menu ----------------------------- */
 /* ----------------------------------------------------------------------------- */
@@ -163,6 +168,22 @@ function distancePointToQuadratic(px, py, x1, y1, cx, cy, x2, y2) {
   }
 
   return best;
+}
+
+/* -------------- Undo redo -----------------*/
+function snapshotHistory() {
+  redoStack = [];
+
+  if (!selectedAnchorPath) return;
+
+  undoStack.push({
+    path: selectedAnchorPath,
+    points: selectedAnchorPath.__points.map(p => ({ ...p }))
+  });
+
+  if (undoStack.length > MAX_HISTORY) {
+    undoStack.shift();
+  }
 }
 
 /* ----------------------------------------------------------------------------- */
@@ -310,6 +331,47 @@ function zoomToSelection(padding = 40) {
 }
 
 /* ----------------------------------------------------------------------------- */
+/* ---------------------------------- Undo redo -------------------------------- */
+/* ----------------------------------------------------------------------------- */
+function undo() {
+  if (!undoStack.length) return;
+
+  const last = undoStack.pop();
+
+  // Save current for redo
+  redoStack.push({
+    path: last.path,
+    points: last.path.__points.map(p => ({ ...p }))
+  });
+
+  // Restore points
+  last.path.__points = last.points.map(p => ({ ...p }));
+
+  // 🔥 THIS IS THE FIX
+  rebuildPathFromPoints(last.path);
+
+  clearControlPoints();
+  drawControlPoints(last.path);
+}
+
+function redo() {
+  if (!redoStack.length) return;
+
+  const next = redoStack.pop();
+
+  undoStack.push({
+    path: next.path,
+    points: next.path.__points.map(p => ({ ...p }))
+  });
+
+  next.path.__points = next.points.map(p => ({ ...p }));
+
+  rebuildPathFromPoints(next.path);
+  clearControlPoints();
+  drawControlPoints(next.path);
+}
+
+/* ----------------------------------------------------------------------------- */
 /* -------------------------------- Menu actions ------------------------------- */
 /* ----------------------------------------------------------------------------- */
 const menus = document.querySelectorAll('.menu');
@@ -375,7 +437,11 @@ document.getElementById('saveFile').onclick = () => {
 };
 
 document.getElementById('undo').onclick = () => {
-  console.log('Undo');
+  undo();
+};
+
+document.getElementById('undo').onclick = () => {
+  redo();
 };
 
 document.getElementById('duplicate').onclick = () => {
@@ -836,12 +902,12 @@ const resetZoomBtn = document.getElementById('resetZoomBtn');
 
 undoBtn.onclick = () => {
   console.log('Undo');
-  // editor.undo();
+  undo();
 };
 
 redoBtn.onclick = () => {
   console.log('Redo');
-  // editor.redo();
+  redo();
 };
 
 /* Optional state update example */
@@ -1162,6 +1228,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (activeTool === 'edit') {
+      // 📌 SNAPSHOT before drag
+      snapshotHistory();
       handleEditStart(e);
     }
 
@@ -1405,6 +1473,8 @@ function clearSelection() {
 function duplicateSelected() {
   if (!selectedElements.length) return;
 
+  snapshotHistory(); // 🔥 push state BEFORE delete
+
   const OFFSET = 10;
   const newSelection = [];
 
@@ -1434,6 +1504,8 @@ function duplicateSelected() {
 //--------------- Delete selected path -----------------
 function deleteSelected() {
   if (!selectedElements.length) return;
+
+  snapshotHistory(); // 🔥 push state BEFORE delete
 
   selectedElements.forEach(el => {
     if (el.parentNode === contentLayer) {
@@ -1615,11 +1687,17 @@ function updateInspector() {
 // Path properties
 strokeWidthInput.addEventListener('input', () => {
   if (!selectedElement) return;
+
+  snapshotHistory(); // 🔥 push state BEFORE delete
+
   selectedElement.setAttribute('stroke-width', strokeWidthInput.value);
 });
 
 opacityInput.addEventListener('input', () => {
   if (!selectedElement) return;
+
+  snapshotHistory(); // 🔥 push state BEFORE delete
+
   selectedElement.setAttribute('opacity', opacityInput.value);
 });
 
@@ -1628,6 +1706,8 @@ opacityInput.addEventListener('input', () => {
 /* ----------------------------------------------------------------------------- */
 function convertToSymbol(elements) {
   if (!elements || !elements.length) return;
+
+  snapshotHistory(); // 🔥 push state BEFORE delete
 
   elements.forEach(el => {
     // ✅ Mark as symbol
@@ -1901,6 +1981,8 @@ function deleteAnchorAtIndex(path, index) {
   const pts = path.__points;
   if (!pts || pts.length <= 0) return;
 
+  snapshotHistory(); // 🔥 push state BEFORE delete
+
   // ❌ If only 2 anchors left, delete the whole path
   if (pts.length === 2) {
     path.remove(); // remove from DOM
@@ -1941,6 +2023,8 @@ function deleteAnchorAtIndex(path, index) {
 function addAnchorToPath(path, x, y) {
   const pts = path.__points;
   if (!pts || pts.length < 2) return;
+
+  snapshotHistory(); // 🔥 push state BEFORE delete
 
   let best = { index: -1, dist: Infinity, x: 0, y: 0 };
 
@@ -2003,40 +2087,40 @@ function addAnchorToPath(path, x, y) {
 
 //--------------- Draw control points ----------------- //
 function drawControlPoints(path) {
-  // 🔹 Build editable point model ONCE
-  path.__points = [];
+  // ✅ Build editable point model ONLY ONCE
+  if (!path.__points) {
+    path.__points = [];
 
-  const d = path.getAttribute('d');
-  const commands = d.match(/[MLQ][^MLQ]*/g) || [];
+    const d = path.getAttribute('d');
+    const commands = d.match(/[MLQ][^MLQ]*/g) || [];
 
-  commands.forEach(cmd => {
-    const type = cmd[0];
-    const nums = cmd
-      .slice(1)
-      .trim()
-      .split(/[ ,]+/)
-      .map(Number);
+    commands.forEach(cmd => {
+      const type = cmd[0];
+      const nums = cmd
+        .slice(1)
+        .trim()
+        .split(/[ ,]+/)
+        .map(Number);
 
-    if (type === 'M' || type === 'L') {
-      path.__points.push({
-        type,
-        x: nums[0],
-        y: nums[1]
-      });
-    }
+      if (type === 'M' || type === 'L') {
+        path.__points.push({ type, x: nums[0], y: nums[1] });
+      }
 
-    if (type === 'Q') {
-      path.__points.push({
-        type,
-        cx: nums[0],
-        cy: nums[1],
-        x: nums[2],
-        y: nums[3]
-      });
-    }
-  });
+      if (type === 'Q') {
+        path.__points.push({
+          type,
+          cx: nums[0],
+          cy: nums[1],
+          x: nums[2],
+          y: nums[3]
+        });
+      }
+    });
+  }
 
-  const qPointIndices = path.__points.map((p, i) => (p.type === 'Q' ? i : null)).filter(i => i !== null);
+  const qPointIndices = path.__points
+    .map((p, i) => (p.type === 'Q' ? i : null))
+    .filter(i => i !== null);
 
   editLayer.innerHTML = '';
 
@@ -2050,65 +2134,40 @@ function drawControlPoints(path) {
     c.setAttribute('r', 4);
     c.classList.add('control-point');
 
-    // 🔥 ACTIVE POINT COLOR (THIS IS THE FIX)
     if (path === selectedAnchorPath && index === selectedAnchorIndex) {
-      c.style.fill = '#007aff';   // 🔵 iOS / Boxy blue
-    } else {
-      c.style.fill = '';               // reset
+      c.style.fill = '#007aff';
     }
 
     c.dataset.index = index;
-    c.__path = path; // attach reference
+    c.__path = path;
 
     c.addEventListener('pointerdown', e => {
       e.stopPropagation();
-
       const idx = Number(c.dataset.index);
 
-       // 🗑 DELETE MODE
+      // 🗑 DELETE
       if (activeTool === 'delete-anchor') {
+        snapshotHistory();
         deleteAnchorAtIndex(path, idx);
         return;
       }
 
-      // 🔗 JOIN‑ANCHOR MODE
+      // 🔗 JOIN
       if (activeTool === 'join-anchor') {
         snapAnchorsIfClose(selectedAnchorPath, selectedAnchorIndex);
         return;
       }
 
-      // ✏️ NORMAL EDIT MODE
+      // ✏️ EDIT
       if (activeTool !== 'edit') return;
-
-      // 🔗 JOIN‑ANCHOR MODE
-      if (activeTool === "join-anchor") {
-        // only allow dragging first or last point
-        if (idx === 0 || idx === path.__points.length - 1) {
-          selectedAnchorPath = path;
-          selectedAnchorIndex = idx;
-          activeControlPoint = c;
-
-          draggingAnchor = idx;
-          draggingPath = path;
-
-          c.__start = {
-            x: path.__points[idx].x,
-            y: path.__points[idx].y,
-            mouseX: e.clientX,
-            mouseY: e.clientY
-          };
-
-          svg.setPointerCapture(e.pointerId);
-        }
-        return;
-      }
 
       selectedAnchorPath = path;
       selectedAnchorIndex = idx;
       activeControlPoint = c;
 
-      clearControlPoints();
-      drawControlPoints(path);
+      // ✅ SNAPSHOT BEFORE DRAG
+      snapshotHistory();
+      console.log('SNAPSHOT', selectedAnchorPath);
 
       draggingAnchor = idx;
       draggingPath = path;
@@ -2132,35 +2191,25 @@ function drawControlPoints(path) {
   const handles = getQuadraticHandlesFromPath(path);
 
   handles.forEach((handle, qIndex) => {
-    // handle line
     const line = document.createElementNS(NS, 'line');
     line.setAttribute('x1', handle.x + t.x);
     line.setAttribute('y1', handle.y + t.y);
     line.setAttribute('x2', handle.cx + t.x);
     line.setAttribute('y2', handle.cy + t.y);
     line.classList.add('bezier-handle-line');
-
-    line.addEventListener('pointerdown', e => {
-      e.stopPropagation();
-    });
-
     editLayer.appendChild(line);
 
-    // handle point
     const point = document.createElementNS(NS, 'circle');
     point.setAttribute('cx', handle.cx + t.x);
     point.setAttribute('cy', handle.cy + t.y);
     point.setAttribute('r', 4);
     point.classList.add('bezier-handle');
 
-    point.style.cursor = 'pointer'; // 👈 hand cursor for handle
-
     point.__handleTarget = handle;
     point.__pathTarget = path;
     point.__pointIndex = qPointIndices[qIndex];
 
     enableBezierHandleDrag(point);
-
     editLayer.appendChild(point);
   });
 }
@@ -2215,10 +2264,8 @@ function handleTransformMove(e) {
 
   selectedElements.forEach(el => {
     const start = startTransforms.get(el) || { x: 0, y: 0 };
-    el.setAttribute(
-      'transform',
-      `translate(${start.x + dx}, ${start.y + dy})`
-    );
+    el.setAttribute('transform', `translate(${start.x + dx}, ${start.y + dy})`);
+    snapshotHistory(); // 🔥 push state BEFORE delete
   });
 
   drawSelectionBoxes();
@@ -2373,10 +2420,8 @@ window.addEventListener('mouseup', () => {
     drawing = false;
 
     if (activeFreehandPath) {
-      activeFreehandPath.setAttribute(
-        'd',
-        simplifyPath(activeFreehandPath.getAttribute('d'))
-      );
+      activeFreehandPath.setAttribute('d', simplifyPath(activeFreehandPath.getAttribute('d')));
+      snapshotHistory(); // 🔥 push state BEFORE delete
     }
 
     activeFreehandPath = null;
@@ -2445,6 +2490,18 @@ window.addEventListener('keydown', e => {
       e.preventDefault();
       deleteSelected();
     }
+  }
+
+  // Undo (Ctrl+Z)
+  if (e.ctrlKey && e.key.toLowerCase() === 'z') {
+    e.preventDefault();
+    undo();
+  }
+
+  // Redo (Ctrl+Shift+Z or Ctrl+Y)
+  if (e.ctrlKey && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) {
+    e.preventDefault();
+    redo();
   }
 });
 
