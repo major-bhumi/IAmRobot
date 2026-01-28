@@ -1189,28 +1189,34 @@ document.addEventListener('DOMContentLoaded', () => {
     return;
   }
 
+  // Flag to temporarily block deselection when clicking inside selection rectangle or handles
+  let ignoreDeselect = false;
+
   svg.addEventListener('mousedown', e => {
-    // ⛔ Ignore clicks on edit-layer UI (anchors, handles)
-    if (e.target.closest('#editLayer')) {
-      return;
+    const handle = e.target.closest('.handle-rect');
+    const rectGroup = e.target.closest('.selection-rect-group');
+    const editLayerTarget = e.target.closest('#editLayer');
+
+    // ⛔ Ignore clicks on edit-layer UI, handles, or selection rectangle
+    if (handle || rectGroup || editLayerTarget) {
+      e.stopPropagation(); // prevent deselection by other listeners
+      ignoreDeselect = true; // block deselection for this click
+      if (handle) startHandleDrag(e, handle); // start drag if it's a handle
+      return; // do nothing else
     }
 
     // Middle mouse = camera pan
     if (e.button === 1) return;
 
+    // Tools
     if (activeTool === 'add-anchor' && selectedElements.length === 1 && selectedElement?.tagName === 'path') {
       const pt = getSVGPoint(e);
-
-      // 🔥 ENSURE __points IS BUILT
       drawControlPoints(selectedElement);
-
       addAnchorToPath(selectedElement, pt.x, pt.y);
       return;
     }
 
-    if (activeTool === 'delete-anchor' && e.target.closest('#editLayer')) {
-      return; // allow anchor pointerdown only
-    }
+    if (activeTool === 'delete-anchor' && editLayerTarget) return;
 
     if (activeTool === 'draw') {
       handleDrawStart(e);
@@ -1228,9 +1234,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (activeTool === 'edit') {
-      // 📌 SNAPSHOT before drag
       snapshotHistory();
       handleEditStart(e);
+      return;
     }
 
     if (activeTool === 'ellipse') {
@@ -1238,6 +1244,20 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
   });
+
+// Reset flag after mouse is released
+window.addEventListener('mouseup', () => {
+  ignoreDeselect = false;
+});
+
+// Modify your clearSelection() function (or wherever you deselect) like this:
+function clearSelection() {
+  if (ignoreDeselect) return; // skip clearing if click was inside selection rect or handle
+  selectedElements = [];
+  selectedElement = null;
+  selectionLayer.innerHTML = '';
+  selectionLayer.removeAttribute('transform');
+}
 
   svg.addEventListener('pointerup', e => {
     draggingAnchor = null;
@@ -1544,20 +1564,11 @@ function bringForward() {
 }
 
 function sendToBack() {
-  console.log('=== sendToBack called ===');
   
-  // Show before state
-  console.log('BEFORE:', Array.from(contentLayer.children).map(el => 
-    el.id || el.tagName
-  ));
   const ordered = getSelectedInDOMOrder();
   ordered.reverse().forEach(el =>
     contentLayer.insertBefore(el, contentLayer.firstChild)
   );
-  // Show after state  
-  console.log('AFTER:', Array.from(contentLayer.children).map(el => 
-    el.id || el.tagName
-  ));
   drawSelectionBoxes();
 }
 
@@ -2230,37 +2241,49 @@ function clearControlPoints() {
 
 //--------------- Draw selection boxes -----------------
 function drawSelectionBoxes() {
-  // ❌ No selection rectangle in edit mode
-  if (activeTool === 'edit' || activeTool === 'delete-anchor' || activeTool === 'add-anchor') {
-    if (activeTool !== 'join-anchor') {
-        selectionLayer.innerHTML = '';
-        clearSelectedAnchor();
-        clearControlPoints();
-    }
-    return;
-  }
-
   selectionLayer.innerHTML = '';
 
   selectedElements.forEach(el => {
     const bbox = el.getBBox();
     const t = getTranslate(el);
 
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('transform', `translate(${t.x}, ${t.y})`);
+
+    // Main selection rectangle
     const rect = document.createElementNS(NS, 'rect');
     rect.setAttribute('x', bbox.x);
     rect.setAttribute('y', bbox.y);
     rect.setAttribute('width', bbox.width);
     rect.setAttribute('height', bbox.height);
     rect.setAttribute('class', 'selection-rect');
-
-    const g = document.createElementNS(NS, 'g');
-    g.setAttribute('transform', `translate(${t.x}, ${t.y})`);
     g.appendChild(rect);
+
+    // Eight handles (corners + midpoints)
+    const handleSize = 8;
+    const positions = [
+      [bbox.x, bbox.y], // top-left
+      [bbox.x + bbox.width/2, bbox.y], // top-center
+      [bbox.x + bbox.width, bbox.y], // top-right
+      [bbox.x + bbox.width, bbox.y + bbox.height/2], // middle-right
+      [bbox.x + bbox.width, bbox.y + bbox.height], // bottom-right
+      [bbox.x + bbox.width/2, bbox.y + bbox.height], // bottom-center
+      [bbox.x, bbox.y + bbox.height], // bottom-left
+      [bbox.x, bbox.y + bbox.height/2] // middle-left
+    ];
+
+    positions.forEach(([x, y]) => {
+      const handle = document.createElementNS(NS, 'rect');
+      handle.setAttribute('x', x - handleSize/2);
+      handle.setAttribute('y', y - handleSize/2);
+      handle.setAttribute('width', handleSize);
+      handle.setAttribute('height', handleSize);
+      handle.setAttribute('class', 'handle-rect');
+      g.appendChild(handle);
+    });
 
     selectionLayer.appendChild(g);
   });
-
-  //updateLayersPanel();
 }
 
 /*------------ Start drag ---------------*/
