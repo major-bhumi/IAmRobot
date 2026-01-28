@@ -1425,9 +1425,18 @@ let ellipseStart = null;
 let currentEllipse = null;
 
 function getSelectedInDOMOrder() {
-  return [...contentLayer.children].filter(el =>
-    selectedElements.includes(el)
-  );
+  return [...contentLayer.children].filter(el => {
+    // Only include elements that are NOT selection rectangles
+    // Check: is it a content element (path, rect, ellipse, etc.)?
+    const isContentElement = 
+      el.parentNode === contentLayer && 
+      el !== selectionLayer &&
+      !el.classList.contains('selection-rect') &&
+      el.tagName !== 'g'; // selection rectangles are in <g> elements
+    
+    // Also make sure it's in selectedElements
+    return isContentElement && selectedElements.includes(el);
+  });
 }
 
 function selectElement(el, additive = false) {
@@ -1546,50 +1555,41 @@ function bringForward() {
 function sendToBack() {
     if (!selectedElements.length) return;
     
-    // Get the actual path/shape elements from the selection rectangles
-    const contentChildren = Array.from(contentLayer.children);
+    // Filter to get only actual path/shape elements from contentLayer
+    const actualElements = selectedElements.filter(el => 
+        el.parentNode === contentLayer && 
+        !el.classList.contains('selection-rect')
+    );
     
-    selectedElements.forEach(selectionRect => {
-        // Find the actual element this selection rectangle represents
-        const targetId = selectionRect.dataset.targetId;
-        if (targetId) {
-            const actualElement = contentLayer.querySelector(`[data-layer-id="${targetId}"]`);
-            if (actualElement && actualElement.parentNode === contentLayer) {
-                // Move actual element to back
-                contentLayer.insertBefore(actualElement, contentChildren[0]);
-            }
-        }
+    // Move to back
+    actualElements.reverse().forEach(el => {
+        contentLayer.insertBefore(el, contentLayer.firstChild);
     });
     
-    // Update selection rectangles after moving elements
+    // Update selection visuals
     drawSelectionBoxes();
 }
 
 function sendBackward() {
     if (!selectedElements.length) return;
     
-    const contentChildren = Array.from(contentLayer.children);
+    // Filter to get only actual path/shape elements from contentLayer
+    const actualElements = selectedElements.filter(el => 
+        el.parentNode === contentLayer && 
+        !el.classList.contains('selection-rect')
+    );
     
-    // Process from top to bottom to maintain order
-    const selectionsWithIndex = selectedElements
-        .map(selectionRect => {
-            const targetId = selectionRect.dataset.targetId;
-            const actualElement = targetId ? 
-                contentLayer.querySelector(`[data-layer-id="${targetId}"]`) : null;
-            return { selectionRect, actualElement, 
-                     index: actualElement ? contentChildren.indexOf(actualElement) : -1 };
-        })
-        .filter(item => item.actualElement && item.index > -1)
-        .sort((a, b) => b.index - a.index); // Topmost first
-    
-    selectionsWithIndex.forEach(({ actualElement, index }) => {
+    // Process from bottom to top
+    actualElements.forEach(el => {
+        const children = Array.from(contentLayer.children);
+        const index = children.indexOf(el);
         if (index > 0) {
-            // Move element down by one position
-            const elementBelow = contentChildren[index - 1];
-            contentLayer.insertBefore(actualElement, elementBelow);
+            const elementBelow = contentLayer.children[index - 1];
+            contentLayer.insertBefore(el, elementBelow);
         }
     });
     
+    // Update selection visuals
     drawSelectionBoxes();
 }
 
