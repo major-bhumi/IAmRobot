@@ -12,6 +12,8 @@ let activeControlPoint = null;
 let freehandPoints = [];
 let activeFreehandPath = null;
 
+let newElements = []; // temp storage for newly drawn/freehand/rect/ellipse
+
 let activeAnchorIndex = null;
 
 let selectedAnchorPath = null;
@@ -422,7 +424,7 @@ document.getElementById('sendBackward').onclick = () => {
 };
 
 document.getElementById('sendToBack').onclick = () => {
-  sendToBack();
+  sendToBack(selectedElements[0]);
 };
 
 document.getElementById('exportImage').onclick = () => {
@@ -993,10 +995,7 @@ function handleDrawStart(e) {
 
   freehandPoints = [{ x: pt.x, y: pt.y }];
 
-  activeFreehandPath = document.createElementNS(
-    'http://www.w3.org/2000/svg',
-    'path'
-  );
+  activeFreehandPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
 
   activeFreehandPath.setAttribute('d', `M ${pt.x} ${pt.y}`);
   activeFreehandPath.setAttribute('fill', 'none');
@@ -1005,9 +1004,13 @@ function handleDrawStart(e) {
   activeFreehandPath.setAttribute('stroke-linecap', 'round');
   activeFreehandPath.setAttribute('stroke-linejoin', 'round');
 
+  // 🔹 Append to SVG so user can see it while drawing
   contentLayer.appendChild(activeFreehandPath);
 
-  updateLayersPanel();
+  // 🔹 Track for later conversion to symbol
+  newElements.push(activeFreehandPath);
+
+  // ❌ Do NOT call updateLayersPanel() yet
 }
 
 function handleRectangleStart(e) {
@@ -1024,7 +1027,7 @@ function handleRectangleStart(e) {
   currentRect.setAttribute('stroke', '#000');
   currentRect.setAttribute('stroke-width', '2');
 
-  contentLayer.appendChild(currentRect);
+  newElements.push(currentRect);
   updateLayersPanel();
 }
 
@@ -1097,7 +1100,7 @@ function handleEllipseStart(e) {
   currentEllipse.setAttribute('stroke', '#000');
   currentEllipse.setAttribute('stroke-width', '2');
 
-  contentLayer.appendChild(currentEllipse);
+  newElements.push(currentEllipse);
   updateLayersPanel();
 }
 
@@ -1372,6 +1375,11 @@ function selectElement(el, additive = false) {
   drawSelectionBoxes();
   updateInspector();
 
+  // 🔹 Only update layers panel if element is marked as a symbol
+  if (el.__isSymbol) {
+    updateLayersPanel();
+  }
+
   if (activeTool === 'edit' && selectedElements.length === 1 && el.tagName === 'path') {
     drawControlPoints(el);
   } else {
@@ -1616,6 +1624,30 @@ opacityInput.addEventListener('input', () => {
 });
 
 /* ----------------------------------------------------------------------------- */
+/* ------------------------- Convert object to symbol -------------------------- */
+/* ----------------------------------------------------------------------------- */
+function convertToSymbol(elements) {
+  if (!elements || !elements.length) return;
+
+  elements.forEach(el => {
+    // ✅ Mark as symbol
+    el.dataset.symbol = 'true';
+
+    // ✅ Make it non-editable until double-click or 'E'
+    el.dataset.locked = 'true';
+    
+    // ✅ Append to main content layer
+    contentLayer.appendChild(el);
+  });
+
+  // Clear temp array
+  newElements = [];
+  
+  // Update layer panel for these now-symbol elements
+  updateLayersPanel();
+}
+
+/* ----------------------------------------------------------------------------- */
 /* ---------------------------- Layer panel logic ------------------------------ */
 /* ----------------------------------------------------------------------------- */
 function updateLayersPanel() {
@@ -1628,6 +1660,8 @@ function updateLayersPanel() {
   const layers = [...contentLayer.children].reverse();
 
   layers.forEach(el => {
+    if (!el.__isLayer) return; // ← skip anything not marked as a layer
+    
     const item = document.createElement('div');
     item.className = 'layer-item';
 
