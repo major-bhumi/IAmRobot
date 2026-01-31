@@ -513,6 +513,8 @@ function ensurePointsModel(path, forceRebuild = false) {
       cursorX = nums[0]; cursorY = nums[1];
       pts.push({ type: 'M', x: cursorX, y: cursorY });
     }
+
+    // L -> C (straight line handles)
     else if (type === 'L') {
       const x = nums[0], y = nums[1];
 
@@ -525,16 +527,28 @@ function ensurePointsModel(path, forceRebuild = false) {
 
       cursorX = x; cursorY = y;
     }
+
+    // Q -> C (quadratic to cubic conversion)
     else if (type === 'Q') {
-      pts.push({
-        type: 'Q',
-        cx: nums[0],
-        cy: nums[1],
-        x: nums[2],
-        y: nums[3]
-      });
-      cursorX = nums[2]; cursorY = nums[3];
+      const qcx = nums[0], qcy = nums[1];
+      const x = nums[2], y = nums[3];
+
+      // P0 = (cursorX, cursorY)
+      // P1 = (qcx, qcy)
+      // P2 = (x, y)
+      //
+      // C1 = P0 + 2/3*(P1 - P0)
+      // C2 = P2 + 2/3*(P1 - P2)
+      const c1x = cursorX + (2 / 3) * (qcx - cursorX);
+      const c1y = cursorY + (2 / 3) * (qcy - cursorY);
+      const c2x = x + (2 / 3) * (qcx - x);
+      const c2y = y + (2 / 3) * (qcy - y);
+
+      pts.push({ type: 'C', c1x, c1y, c2x, c2y, x, y });
+
+      cursorX = x; cursorY = y;
     }
+
     else if (type === 'C') {
       pts.push({
         type: 'C',
@@ -545,6 +559,29 @@ function ensurePointsModel(path, forceRebuild = false) {
       cursorX = nums[4]; cursorY = nums[5];
     }
   });
+
+  // ✅ If path ends with Z, add an explicit closing cubic segment
+  // so the "last segment" has real handles in edit mode.
+  if (path.__closed && pts.length > 1) {
+    var start = pts[0]; // M point
+    var sx = start.x, sy = start.y;
+
+    // cursorX/cursorY currently equals the last anchor after parsing commands
+    var ex = cursorX, ey = cursorY;
+
+    // If we are not already at the start, add a closing C segment
+    if (Math.abs(ex - sx) > 0.0001 || Math.abs(ey - sy) > 0.0001) {
+      var c1x = ex + (sx - ex) / 3;
+      var c1y = ey + (sy - ey) / 3;
+      var c2x = ex + 2 * (sx - ex) / 3;
+      var c2y = ey + 2 * (sy - ey) / 3;
+
+      pts.push({ type: 'C', c1x: c1x, c1y: c1y, c2x: c2x, c2y: c2y, x: sx, y: sy });
+
+      // update cursor (not required, but keeps state consistent)
+      cursorX = sx; cursorY = sy;
+    }
+  }
 
   path.__points = pts;
   return pts;
@@ -750,6 +787,186 @@ function resetTimeline() {
   // reset state
   timelineLayerCount = 0;
   activeTimelineLayerId = null;
+
+  /* ----------------------------------------------------------------------------- */
+/* ------------------------ Timeline keyframes + rendering ---------------------- */
+/* ----------------------------------------------------------------------------- */
+
+// layerId -> { keyframes: Map<number, string>, visible: bool, locked: bool }
+const tlState = new Map();
+
+// make sure a layer state exists
+function ensureTimelineLayerState(layerId) {
+  if (!tlState.has(layerId)) {
+    tlState.set(layerId, {
+      keyframes: new Map(),
+      visible: true,
+      locked: false
+    });
+  }
+  return tlState.get(layerId);
+}
+
+// resolve which keyframe HTML to show for (layerId, frame)
+function resolveLayerHTML(layerId, frame) {
+  const st = ensureTimelineLayerState(layerId);
+  for (let f = frame; f >= 1; f--) {
+    if (st.keyframes.has(f)) return st.keyframes.get(f);
+  }
+  return ''; // nothing yet
+}
+
+// does this frame have a real keyframe?
+function hasKeyframe(layerId, frame) {
+  const st = ensureTimelineLayerState(layerId);
+  return st.keyframes.has(frame);
+}
+
+// ensure a keyframe exists at (layerId, frame)
+// mode: 'copy' copies from previous resolved frame; 'blank' makes empty
+function ensureKeyframe(layerId, frame, mode = 'copy') {
+  const st = ensureTimelineLayerState(layerId);
+  if (st.keyframes.has(frame)) return;
+
+  const html = (mode === 'blank') ? '' : resolveLayerHTML(layerId, frame - 1);
+  st.keyframes.set(frame, html);
+
+  updateKeyframeCellUI(layerId, frame);
+  updateHoldsUI(layerId); // keep hold styling correct
+}
+
+// save current SVG group contents into keyframe at (layerId, frame) IF frame is a keyframe
+function saveKeyframeFromStage(layerId, frame) {
+  const st = ensureTimelineLayerState(layerId);
+  if (!st.keyframes.has(frame)) return;
+
+  const g = ensureTimelineSVGGroup(layerId);
+  st.keyframes.set(frame, g.innerHTML);
+
+  updateKeyframeCellUI(layerId, frame);
+  updateHoldsUI(layerId);
+}
+
+// render one layer at a frame (applies hold automatically)
+function renderLayerAtFrame(layerId, frame) {
+  const st = ensureTimelineLayerState(layerId);
+  const g = ensureTimelineSVGGroup(layerId);
+
+  // visibility + lock affect pointer events
+  g.style.display = st.visible ? '' : 'none';
+
+  // apply resolved content
+  const html = resolveLayerHTML(layerId, frame);
+  g.innerHTML = html;
+
+  // lock editing on non-active or locked layers
+  const isActive = (layerId === activeTimelineLayerId);
+  const canEdit = isActive && !st.locked && st.visible;
+  g.style.pointerEvents = canEdit ? 'all' : 'none';
+}
+
+// render all layers
+function renderFrame(frame) {
+  // clear selection/control points when changing frames (safe + predictable)
+  clearSelection();
+  clearControlPoints();
+
+  const layerEls = [...timelineLayers.querySelectorAll('.timeline-layer[data-layer-id]')];
+  for (const el of layerEls) {
+    renderLayerAtFrame(el.dataset.layerId, frame);
+  }
+
+  drawSelectionBoxes();
+}
+
+// save active layer keyframe (if it exists) before leaving frame
+function saveActiveLayerIfKeyframed() {
+  if (!activeTimelineLayerId) return;
+  saveKeyframeFromStage(activeTimelineLayerId, currentFrame);
+}
+
+// the ONLY way you should change frames
+function setCurrentFrame(frame) {
+  const next = Math.max(1, Math.min(totalFrames, frame));
+  if (next === currentFrame) return;
+
+  // save current active layer edits if current frame is a keyframe
+  saveActiveLayerIfKeyframed();
+
+  setCurrentFrame(idx);
+  renderFrame(currentFrame);
+}
+
+// call this BEFORE any edit/draw mutation happens
+function timelineBeforeMutate(mode = 'copy') {
+  if (!activeTimelineLayerId) return;
+
+  // don't allow editing locked/hidden
+  const st = ensureTimelineLayerState(activeTimelineLayerId);
+  if (st.locked || !st.visible) return;
+
+  // auto-create a keyframe at current frame so edits persist
+  ensureKeyframe(activeTimelineLayerId, currentFrame, mode);
+
+  // make sure stage is showing that frame's content
+  renderLayerAtFrame(activeTimelineLayerId, currentFrame);
+}
+
+// call this AFTER an edit mutation completes (mouseup / commit)
+function timelineAfterMutate() {
+  if (!activeTimelineLayerId) return;
+  saveKeyframeFromStage(activeTimelineLayerId, currentFrame);
+}
+
+/* ----------------------------- Timeline cell UI ----------------------------- */
+
+function getFrameCell(layerId, frame) {
+  const row = timelineFrames.querySelector(`.frame-row[data-layer-id="${layerId}"]`);
+  if (!row) return null;
+  const idx = frame - 1;
+  return row.children[idx] || null;
+}
+
+// add/remove keyframe marker (dot) on a single cell
+function updateKeyframeCellUI(layerId, frame) {
+  const cell = getFrameCell(layerId, frame);
+  if (!cell) return;
+
+  cell.classList.toggle('is-keyframe', hasKeyframe(layerId, frame));
+
+  // ensure we have a dot element
+  let dot = cell.querySelector('.kf-dot');
+  if (!dot) {
+    dot = document.createElement('div');
+    dot.className = 'kf-dot';
+    cell.appendChild(dot);
+  }
+  dot.style.display = hasKeyframe(layerId, frame) ? 'block' : 'none';
+}
+
+// show holds (frames between keyframes)
+function updateHoldsUI(layerId) {
+  const st = ensureTimelineLayerState(layerId);
+
+  // collect sorted keyframes
+  const keys = [...st.keyframes.keys()].sort((a, b) => a - b);
+
+  // clear holds first
+  for (let f = 1; f <= totalFrames; f++) {
+    const cell = getFrameCell(layerId, f);
+    if (cell) cell.classList.remove('is-hold');
+  }
+
+  // mark holds between keyframes
+  for (let i = 0; i < keys.length; i++) {
+    const start = keys[i];
+    const end = (i + 1 < keys.length) ? keys[i + 1] : (totalFrames + 1);
+    for (let f = start + 1; f < end; f++) {
+      const cell = getFrameCell(layerId, f);
+      if (cell) cell.classList.add('is-hold');
+    }
+  }
+}
 
   // rebuild ruler
   // rebuild ruler (✅ put ticks inside timelineRulerInner)
@@ -2515,7 +2732,6 @@ function handleRectangleEnd(e) {
     }
 
     // switch to transform + select
-    setActiveTool(transformTool, 'transform');
     selectElement(currentRect, false);
   }
 
@@ -2620,7 +2836,6 @@ function handleEllipseEnd(e) {
   if (w < MIN_SIZE || h < MIN_SIZE) {
     currentEllipse.remove();
   } else {
-    setActiveTool(transformTool, 'transform');
     selectElement(currentEllipse, false);
   }
 
@@ -2664,11 +2879,14 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    timelineBeforeMutate('copy');
+
     const rotateHandle = e.target.closest('.rotate-handle');
     if (rotateHandle && activeTool === 'transform' && selectedElements.length) {
       e.stopImmediatePropagation();
       e.preventDefault();
       ignoreDeselect = true;
+      timelineBeforeMutate('copy');
       startRotateDrag(e);
       return;
     }
@@ -2681,12 +2899,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // 1) Handle drag has priority
       if (handle) {
+        timelineBeforeMutate('copy');
         startHandleDrag(e, handle);
         return;
       }
 
       // 2) Click inside selection rectangle should MOVE selection (transform tool only)
       if (rectGroup && activeTool === 'transform' && selectedElements.length) {
+        timelineBeforeMutate('copy');
         isDragging = true;
         dragStart = getSVGPoint(e);
 
@@ -2724,9 +2944,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (activeTool === 'delete-anchor' && editLayerTarget) return;
 
-    if (activeTool === 'rectangle') {
-      handleRectangleStart(e);
-      return;
+    if (activeTool === 'rectangle') { 
+      timelineBeforeMutate('copy'); 
+      handleRectangleStart(e); 
+      return; 
     }
 
     if (activeTool === 'draw') {
@@ -2746,13 +2967,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (activeTool === 'spline') {
+      timelineBeforeMutate('copy');
       handleSplineMouseDown(e);
       return;
     }
 
-    if (activeTool === 'ellipse') {
-      handleEllipseStart(e);
-      return;
+    if (activeTool === 'ellipse') { 
+      timelineBeforeMutate('copy'); 
+      handleEllipseStart(e); 
+      return; 
     }
   });
 
@@ -2764,6 +2987,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   svg.addEventListener('pointerup', e => {
+    timelineAfterMutate();
+    
     draggingAnchor = null;
     draggingPath = null;
     activeHandle = null;
@@ -2848,8 +3073,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // 🔹 Bezier handle drag
     if (draggingAnchor === 'bezier' && activeHandle) {
       var path = activeHandle.path;
+      if (!path) return;
+
+      // rebuild model if needed
       ensurePointsModel(path);
 
+      // mouse in LOCAL space of the path
       var ptW = getSVGPoint(e);
       var localMouse = worldToLocal(path, ptW.x, ptW.y);
 
@@ -2857,23 +3086,19 @@ document.addEventListener('DOMContentLoaded', () => {
       var dy = localMouse.y - activeHandle.startMouseY;
 
       var p = path.__points[activeHandle.pointIndex];
-      if (!p) return;
+      if (!p || p.type !== 'C') return; // everything should be C now
 
-      if (p.type === 'C') {
-        if (activeHandle.kind === 'c1') {
-          p.c1x = activeHandle.startCX + dx;
-          p.c1y = activeHandle.startCY + dy;
-        } else {
-          p.c2x = activeHandle.startCX + dx;
-          p.c2y = activeHandle.startCY + dy;
-        }
+      if (activeHandle.kind === 'c1') {
+        p.c1x = activeHandle.startCX + dx;
+        p.c1y = activeHandle.startCY + dy;
       } else {
-        p.cx = activeHandle.startCX + dx;
-        p.cy = activeHandle.startCY + dy;
+        p.c2x = activeHandle.startCX + dx;
+        p.c2y = activeHandle.startCY + dy;
       }
 
       rebuildPathFromPoints(path);
       drawControlPoints(path);
+      return;
     }
   });
 
@@ -4550,38 +4775,40 @@ function enableBezierHandleDrag(handleEl) {
     e.preventDefault();
     e.stopPropagation();
 
-    // lock pointer to this handle so it can't "switch" mid-drag
+    // keep move events flowing to svg (your app uses svg pointermove)
     try { svg.setPointerCapture(e.pointerId); } catch (_) {}
 
     isHandleDragging = true;
     draggingAnchor = 'bezier';
 
     var path = handleEl.__pathTarget;
+    if (!path) return;
+
+    draggingPath = path; // ✅ required (your pointermove guard uses this)
+
+    timelineBeforeMutate('copy');
+
+    // Make sure model exists (and is cubic now)
     ensurePointsModel(path);
 
-    // prefer dataset (robust), fallback to __ props
-    var kind = (handleEl.dataset && handleEl.dataset.kind) || handleEl.__handleKind || 'q';
+    // Which handle on which segment
+    var kind = (handleEl.dataset && handleEl.dataset.kind) || handleEl.__handleKind || 'c1';
     var pointIndex = parseInt(
       (handleEl.dataset && handleEl.dataset.pointIndex) || handleEl.__pointIndex,
       10
     );
 
     var p = path.__points[pointIndex];
+    if (!p || p.type !== 'C') return;
 
-    // mouse in LOCAL space of the path
+    // mouse in LOCAL path space
     var ptW = getSVGPoint(e);
     var localMouse = worldToLocal(path, ptW.x, ptW.y);
 
+    // starting control point
     var startCX, startCY;
-
-    if (p && p.type === 'C') {
-      if (kind === 'c1') { startCX = p.c1x; startCY = p.c1y; }
-      else              { startCX = p.c2x; startCY = p.c2y; }
-    } else {
-      // quadratic fallback
-      startCX = (p && p.cx != null) ? p.cx : handleEl.__handleTarget.cx;
-      startCY = (p && p.cy != null) ? p.cy : handleEl.__handleTarget.cy;
-    }
+    if (kind === 'c1') { startCX = p.c1x; startCY = p.c1y; }
+    else              { startCX = p.c2x; startCY = p.c2y; }
 
     activeHandle = {
       path: path,
@@ -4726,6 +4953,7 @@ window.addEventListener('mousemove', e => {
 
   /*--------------- Left toolbar -----------------*/
   if (activeTool === 'draw') {
+    timelineBeforeMutate('copy');
     handleDrawMove(e);
   }
 
@@ -5154,8 +5382,14 @@ function createTimelineLayer(name) {
 
   // make it active
   selectTimelineLayer(layerId);
+  renderFrame(currentFrame);
 
   syncTimelineLayerRenderOrder();
+
+  ensureTimelineLayerState(layerId);
+  ensureKeyframe(layerId, 1, 'blank');  // frame 1 starts as a keyframe
+  updateKeyframeCellUI(layerId, 1);
+  updateHoldsUI(layerId);
 
   return layerId;
 }
@@ -5275,8 +5509,7 @@ timelineFrames.addEventListener('click', (e) => {
   const idx = [...row.children].indexOf(cell);
   if (idx < 0) return;
 
-  currentFrame = idx + 1;
-  updatePlayhead();
+  setCurrentFrame(idx + 1);
 });
 
 function setFrameFromRulerClientX(clientX) {
@@ -5287,8 +5520,7 @@ function setFrameFromRulerClientX(clientX) {
   const x = localX + timelineHScroll.scrollLeft;
 
   const idx = Math.floor(x / frameWidth) + 1;
-  currentFrame = Math.max(1, Math.min(totalFrames, idx));
-  updatePlayhead();
+  setCurrentFrame(idx);
 }
 
 // Click-to-jump + drag-to-scrub
