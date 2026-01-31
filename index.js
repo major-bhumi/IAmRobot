@@ -2988,7 +2988,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   svg.addEventListener('pointerup', e => {
     timelineAfterMutate();
-    
+
     draggingAnchor = null;
     draggingPath = null;
     activeHandle = null;
@@ -4469,6 +4469,8 @@ function drawControlPoints(path) {
       draggingPath = path;
       activeAnchorIndex = idx;
 
+      timelineBeforeMutate('copy');
+
       const ptData = path.__points[idx];
 
       // ✅ store start in LOCAL coords, and also store mouse in LOCAL coords
@@ -4595,6 +4597,8 @@ function drawEllipseControls(path) {
       draggingPath = path;
       draggingAnchor = `ellipse-${kind}`;
       activeControlPoint = c;
+
+      timelineBeforeMutate('copy');
 
       const worldMouse = getSVGPoint(e);
       const localMouse = worldToLocal(path, worldMouse.x, worldMouse.y);
