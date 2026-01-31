@@ -496,8 +496,9 @@ function ensurePointsModel(path, forceRebuild = false) {
   path.__closed = /[zZ]\s*$/.test(d.trim());
 
   const commands = d.match(/[MLQC][^MLQC]*/g) || [];
-
   const pts = [];
+
+  let cursorX = 0, cursorY = 0;
 
   commands.forEach(cmd => {
     const type = cmd[0];
@@ -508,23 +509,40 @@ function ensurePointsModel(path, forceRebuild = false) {
       .filter(Boolean)
       .map(Number);
 
-    if (type === 'M' || type === 'L') {
-      pts.push({ type, x: nums[0], y: nums[1] });
-    } else if (type === 'Q') {
+    if (type === 'M') {
+      cursorX = nums[0]; cursorY = nums[1];
+      pts.push({ type: 'M', x: cursorX, y: cursorY });
+    }
+    else if (type === 'L') {
+      const x = nums[0], y = nums[1];
+
+      const c1x = cursorX + (x - cursorX) / 3;
+      const c1y = cursorY + (y - cursorY) / 3;
+      const c2x = cursorX + 2 * (x - cursorX) / 3;
+      const c2y = cursorY + 2 * (y - cursorY) / 3;
+
+      pts.push({ type: 'C', c1x, c1y, c2x, c2y, x, y });
+
+      cursorX = x; cursorY = y;
+    }
+    else if (type === 'Q') {
       pts.push({
-        type,
+        type: 'Q',
         cx: nums[0],
         cy: nums[1],
         x: nums[2],
         y: nums[3]
       });
-    } else if (type === 'C') {
+      cursorX = nums[2]; cursorY = nums[3];
+    }
+    else if (type === 'C') {
       pts.push({
-        type,
+        type: 'C',
         c1x: nums[0], c1y: nums[1],
         c2x: nums[2], c2y: nums[3],
         x: nums[4],  y: nums[5]
       });
+      cursorX = nums[4]; cursorY = nums[5];
     }
   });
 
@@ -948,10 +966,22 @@ function shouldShowControlPoints() {
 function refreshAfterHistory() {
   if (shouldShowControlPoints()) {
     clearControlPoints();
-    drawControlPoints(selectedElement);
+
+    // ✅ IMPORTANT: after undo/redo, rebuild path model from current 'd'
+    if (selectedElement && selectedElement.tagName === 'path') {
+      ensurePointsModel(selectedElement, true);
+    }
+
+    // ✅ ellipse uses special handles
+    if (selectedElement && selectedElement.__shape === 'ellipse') {
+      drawEllipseControls(selectedElement);
+    } else {
+      drawControlPoints(selectedElement);
+    }
   } else {
     clearControlPoints();
   }
+
   drawSelectionBoxes();
 }
 
@@ -1341,7 +1371,16 @@ function updateCamera() {
   drawSelectionBoxes();
   if (shouldShowControlPoints()) {
     clearControlPoints();
-    drawControlPoints(selectedElement);
+
+    if (selectedElement && selectedElement.tagName === 'path') {
+      ensurePointsModel(selectedElement, true);
+    }
+
+    if (selectedElement && selectedElement.__shape === 'ellipse') {
+      drawEllipseControls(selectedElement);
+    } else {
+      drawControlPoints(selectedElement);
+    }
   }
 }
 
@@ -2269,9 +2308,16 @@ function setActiveTool(tool, toolName) {
     selectedElement?.tagName === 'path'
   ) {
     // ✅ ellipse uses special handles
-    if (selectedElement.__shape === 'ellipse') drawEllipseControls(selectedElement);
-    else drawControlPoints(selectedElement);
+    if (selectedElement && selectedElement.tagName === 'path') {
+      ensurePointsModel(selectedElement, true);
     }
+
+    if (selectedElement && selectedElement.__shape === 'ellipse') {
+      drawEllipseControls(selectedElement);
+    } else {
+      drawControlPoints(selectedElement);
+    }
+  }
 }
 
 transformTool.onclick = () => {
@@ -2642,10 +2688,19 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.button === 1) return;
 
     // Tools
-    if (activeTool === 'add-anchor' && selectedElements.length === 1 && selectedElement?.tagName === 'path') {
+    if (activeTool === 'add-anchor' && selectedElements.length === 1 && selectedElement && selectedElement.tagName === 'path') {
       const pt = getSVGPoint(e);
-      drawControlPoints(selectedElement);
+
+      // 1) modify the path first
       addAnchorToPath(selectedElement, pt.x, pt.y);
+
+      // 2) rebuild points model from new 'd'
+      ensurePointsModel(selectedElement, true);
+
+      // 3) redraw control points after mutation
+      clearControlPoints();
+      drawControlPoints(selectedElement);
+
       return;
     }
 
@@ -2774,33 +2829,33 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 🔹 Bezier handle drag
     if (draggingAnchor === 'bezier' && activeHandle) {
-      const start = activeHandle.__start;
-      const pt = activeHandle.path.__points[activeHandle.pointIndex];
-      if (!pt) return;
+      var path = activeHandle.path;
+      ensurePointsModel(path);
 
-      const worldMouse = getSVGPoint(e);
-      const localMouse = worldToLocal(activeHandle.path, worldMouse.x, worldMouse.y);
+      var ptW = getSVGPoint(e);
+      var localMouse = worldToLocal(path, ptW.x, ptW.y);
 
-      const dx = localMouse.x - start.mouseLocalX;
-      const dy = localMouse.y - start.mouseLocalY;
+      var dx = localMouse.x - activeHandle.startMouseX;
+      var dy = localMouse.y - activeHandle.startMouseY;
 
-      if (pt.type === 'C') {
+      var p = path.__points[activeHandle.pointIndex];
+      if (!p) return;
+
+      if (p.type === 'C') {
         if (activeHandle.kind === 'c1') {
-          pt.c1x = start.cx + dx;
-          pt.c1y = start.cy + dy;
+          p.c1x = activeHandle.startCX + dx;
+          p.c1y = activeHandle.startCY + dy;
         } else {
-          pt.c2x = start.cx + dx;
-          pt.c2y = start.cy + dy;
+          p.c2x = activeHandle.startCX + dx;
+          p.c2y = activeHandle.startCY + dy;
         }
       } else {
-        // quadratic (existing)
-        pt.cx = start.cx + dx;
-        pt.cy = start.cy + dy;
+        p.cx = activeHandle.startCX + dx;
+        p.cy = activeHandle.startCY + dy;
       }
 
-      rebuildPathFromPoints(activeHandle.path);
-      clearControlPoints();
-      drawControlPoints(activeHandle.path);
+      rebuildPathFromPoints(path);
+      drawControlPoints(path);
     }
   });
 
@@ -4222,6 +4277,11 @@ function drawControlPoints(path) {
     point.__pathTarget = path;
     point.__pointIndex = qPointIndices[qIndex];
 
+    point.__pointIndex  = handle.pointIndex;
+    point.__handleKind  = handle.kind;                 // "c1" or "c2"
+    point.dataset.kind = handle.kind;
+    point.dataset.pointIndex = String(handle.pointIndex);
+
     enableBezierHandleDrag(point);
     editLayer.appendChild(point);
   });
@@ -4469,50 +4529,52 @@ function handleDrawMove(e) {
 }
 
 function enableBezierHandleDrag(handleEl) {
-  handleEl.addEventListener('pointerdown', e => {
-    if (activeTool !== 'edit') return;
-
+  handleEl.addEventListener('pointerdown', function (e) {
+    e.preventDefault();
     e.stopPropagation();
 
-    const path = handleEl.__pathTarget;
+    // lock pointer to this handle so it can't "switch" mid-drag
+    try { handleEl.setPointerCapture(e.pointerId); } catch (_) {}
 
-    const worldMouse = getSVGPoint(e);
-    const localMouse = worldToLocal(path, worldMouse.x, worldMouse.y);
-
-    handleEl.__start = (function () {
-      const p = path.__points[handleEl.__pointIndex];
-      const kind = handleEl.__handleKind || 'q';
-
-      let cx, cy;
-
-      // Cubic: choose which control point we’re dragging
-      if (p && p.type === 'C') {
-        if (kind === 'c1') { cx = p.c1x; cy = p.c1y; }
-        else              { cx = p.c2x; cy = p.c2y; }
-      } else {
-        // Quadratic (or fallback): single control point
-        cx = (p && p.cx != null) ? p.cx : handleEl.__handleTarget.cx;
-        cy = (p && p.cy != null) ? p.cy : handleEl.__handleTarget.cy;
-      }
-
-      return {
-        cx: cx,
-        cy: cy,
-        mouseLocalX: localMouse.x,
-        mouseLocalY: localMouse.y
-      };
-    })();
-
+    isHandleDragging = true;
     draggingAnchor = 'bezier';
-    draggingPath = path;
+
+    var path = handleEl.__pathTarget;
+    ensurePointsModel(path);
+
+    // prefer dataset (robust), fallback to __ props
+    var kind = (handleEl.dataset && handleEl.dataset.kind) || handleEl.__handleKind || 'q';
+    var pointIndex = parseInt(
+      (handleEl.dataset && handleEl.dataset.pointIndex) || handleEl.__pointIndex,
+      10
+    );
+
+    var p = path.__points[pointIndex];
+
+    // mouse in LOCAL space of the path
+    var ptW = getSVGPoint(e);
+    var localMouse = worldToLocal(path, ptW.x, ptW.y);
+
+    var startCX, startCY;
+
+    if (p && p.type === 'C') {
+      if (kind === 'c1') { startCX = p.c1x; startCY = p.c1y; }
+      else              { startCX = p.c2x; startCY = p.c2y; }
+    } else {
+      // quadratic fallback
+      startCX = (p && p.cx != null) ? p.cx : handleEl.__handleTarget.cx;
+      startCY = (p && p.cy != null) ? p.cy : handleEl.__handleTarget.cy;
+    }
 
     activeHandle = {
-      path,
-      pointIndex: handleEl.__pointIndex,
-      __start: handleEl.__start
+      path: path,
+      pointIndex: pointIndex,
+      kind: kind,
+      startCX: startCX,
+      startCY: startCY,
+      startMouseX: localMouse.x,
+      startMouseY: localMouse.y
     };
-
-    handleEl.setPointerCapture(e.pointerId);
   });
 }
 
@@ -4786,6 +4848,14 @@ window.addEventListener('mouseup', (event) => {
     activeControlPoint = null;
 
     clearControlPoints(); // optional: shows updated anchors
+  }
+});
+
+window.addEventListener('pointerup', function () {
+  if (draggingAnchor === 'bezier') {
+    isHandleDragging = false;
+    draggingAnchor = null;
+    activeHandle = null;
   }
 });
 
