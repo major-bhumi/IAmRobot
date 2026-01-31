@@ -788,8 +788,7 @@ function resetTimeline() {
   timelineLayerCount = 0;
   activeTimelineLayerId = null;
 
-  tlState.clear();
-
+  // rebuild ruler
   // rebuild ruler (✅ put ticks inside timelineRulerInner)
   timelineRuler.style.display = 'flex';
   timelineRulerInner.innerHTML = '';
@@ -816,187 +815,6 @@ function resetTimeline() {
   updateTimelineScrollWidth();
   wireTimelineHorizontalScroll();
   updatePlayhead();
-}
-
-/* ----------------------------------------------------------------------------- */
-/* ------------------------ Timeline keyframes + rendering ---------------------- */
-/* ----------------------------------------------------------------------------- */
-
-// layerId -> { keyframes: Map<number, string>, visible: bool, locked: bool }
-const tlState = new Map();
-
-// make sure a layer state exists
-function ensureTimelineLayerState(layerId) {
-  if (!tlState.has(layerId)) {
-    tlState.set(layerId, {
-      keyframes: new Map(),
-      visible: true,
-      locked: false
-    });
-  }
-  return tlState.get(layerId);
-}
-
-// resolve which keyframe HTML to show for (layerId, frame)
-function resolveLayerHTML(layerId, frame) {
-  const st = ensureTimelineLayerState(layerId);
-  for (let f = frame; f >= 1; f--) {
-    if (st.keyframes.has(f)) return st.keyframes.get(f);
-  }
-  return ''; // nothing yet
-}
-
-// does this frame have a real keyframe?
-function hasKeyframe(layerId, frame) {
-  const st = ensureTimelineLayerState(layerId);
-  return st.keyframes.has(frame);
-}
-
-// ensure a keyframe exists at (layerId, frame)
-// mode: 'copy' copies from previous resolved frame; 'blank' makes empty
-function ensureKeyframe(layerId, frame, mode = 'copy') {
-  const st = ensureTimelineLayerState(layerId);
-  if (st.keyframes.has(frame)) return;
-
-  const html = (mode === 'blank') ? '' : resolveLayerHTML(layerId, frame - 1);
-  st.keyframes.set(frame, html);
-
-  updateKeyframeCellUI(layerId, frame);
-  updateHoldsUI(layerId); // keep hold styling correct
-}
-
-// save current SVG group contents into keyframe at (layerId, frame) IF frame is a keyframe
-function saveKeyframeFromStage(layerId, frame) {
-  const st = ensureTimelineLayerState(layerId);
-  if (!st.keyframes.has(frame)) return;
-
-  const g = ensureTimelineSVGGroup(layerId);
-  st.keyframes.set(frame, g.innerHTML);
-
-  updateKeyframeCellUI(layerId, frame);
-  updateHoldsUI(layerId);
-}
-
-// render one layer at a frame (applies hold automatically)
-function renderLayerAtFrame(layerId, frame) {
-  const st = ensureTimelineLayerState(layerId);
-  const g = ensureTimelineSVGGroup(layerId);
-
-  // visibility + lock affect pointer events
-  g.style.display = st.visible ? '' : 'none';
-
-  // apply resolved content
-  const html = resolveLayerHTML(layerId, frame);
-  g.innerHTML = html;
-
-  // lock editing on non-active or locked layers
-  const isActive = (layerId === activeTimelineLayerId);
-  const canEdit = isActive && !st.locked && st.visible;
-  g.style.pointerEvents = canEdit ? 'all' : 'none';
-}
-
-// render all layers
-function renderFrame(frame) {
-  // clear selection/control points when changing frames (safe + predictable)
-  clearSelection();
-  clearControlPoints();
-
-  const layerEls = [...timelineLayers.querySelectorAll('.timeline-layer[data-layer-id]')];
-  for (const el of layerEls) {
-    renderLayerAtFrame(el.dataset.layerId, frame);
-  }
-
-  drawSelectionBoxes();
-}
-
-// save active layer keyframe (if it exists) before leaving frame
-function saveActiveLayerIfKeyframed() {
-  if (!activeTimelineLayerId) return;
-  saveKeyframeFromStage(activeTimelineLayerId, currentFrame);
-}
-
-// the ONLY way you should change frames
-function setCurrentFrame(frame) {
-  const next = Math.max(1, Math.min(totalFrames, frame));
-  if (next === currentFrame) return;
-
-  // save current active layer edits if current frame is a keyframe
-  saveActiveLayerIfKeyframed();
-
-  currentFrame = next;
-  updatePlayhead();
-  renderFrame(currentFrame);
-}
-
-// call this BEFORE any edit/draw mutation happens
-function timelineBeforeMutate(mode = 'copy') {
-  if (!activeTimelineLayerId) return;
-
-  // don't allow editing locked/hidden
-  const st = ensureTimelineLayerState(activeTimelineLayerId);
-  if (st.locked || !st.visible) return;
-
-  // auto-create a keyframe at current frame so edits persist
-  ensureKeyframe(activeTimelineLayerId, currentFrame, mode);
-
-  // make sure stage is showing that frame's content
-  renderLayerAtFrame(activeTimelineLayerId, currentFrame);
-}
-
-// call this AFTER an edit mutation completes (mouseup / commit)
-function timelineAfterMutate() {
-  if (!activeTimelineLayerId) return;
-  saveKeyframeFromStage(activeTimelineLayerId, currentFrame);
-}
-
-/* ----------------------------- Timeline cell UI ----------------------------- */
-
-function getFrameCell(layerId, frame) {
-  const row = timelineFrames.querySelector(`.frame-row[data-layer-id="${layerId}"]`);
-  if (!row) return null;
-  const idx = frame - 1;
-  return row.children[idx] || null;
-}
-
-// add/remove keyframe marker (dot) on a single cell
-function updateKeyframeCellUI(layerId, frame) {
-  const cell = getFrameCell(layerId, frame);
-  if (!cell) return;
-
-  cell.classList.toggle('is-keyframe', hasKeyframe(layerId, frame));
-
-  // ensure we have a dot element
-  let dot = cell.querySelector('.kf-dot');
-  if (!dot) {
-    dot = document.createElement('div');
-    dot.className = 'kf-dot';
-    cell.appendChild(dot);
-  }
-  dot.style.display = hasKeyframe(layerId, frame) ? 'block' : 'none';
-}
-
-// show holds (frames between keyframes)
-function updateHoldsUI(layerId) {
-  const st = ensureTimelineLayerState(layerId);
-
-  // collect sorted keyframes
-  const keys = [...st.keyframes.keys()].sort((a, b) => a - b);
-
-  // clear holds first
-  for (let f = 1; f <= totalFrames; f++) {
-    const cell = getFrameCell(layerId, f);
-    if (cell) cell.classList.remove('is-hold');
-  }
-
-  // mark holds between keyframes
-  for (let i = 0; i < keys.length; i++) {
-    const start = keys[i];
-    const end = (i + 1 < keys.length) ? keys[i + 1] : (totalFrames + 1);
-    for (let f = start + 1; f < end; f++) {
-      const cell = getFrameCell(layerId, f);
-      if (cell) cell.classList.add('is-hold');
-    }
-  }
 }
 
 function isTimelineLayerLocked(layerId){
@@ -2881,14 +2699,11 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    timelineBeforeMutate('copy');
-
     const rotateHandle = e.target.closest('.rotate-handle');
     if (rotateHandle && activeTool === 'transform' && selectedElements.length) {
       e.stopImmediatePropagation();
       e.preventDefault();
       ignoreDeselect = true;
-      timelineBeforeMutate('copy');
       startRotateDrag(e);
       return;
     }
@@ -2901,14 +2716,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // 1) Handle drag has priority
       if (handle) {
-        timelineBeforeMutate('copy');
         startHandleDrag(e, handle);
         return;
       }
 
       // 2) Click inside selection rectangle should MOVE selection (transform tool only)
       if (rectGroup && activeTool === 'transform' && selectedElements.length) {
-        timelineBeforeMutate('copy');
         isDragging = true;
         dragStart = getSVGPoint(e);
 
@@ -2946,10 +2759,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (activeTool === 'delete-anchor' && editLayerTarget) return;
 
-    if (activeTool === 'rectangle') { 
-      timelineBeforeMutate('copy'); 
-      handleRectangleStart(e); 
-      return; 
+    if (activeTool === 'rectangle') {
+      handleRectangleStart(e);
+      return;
     }
 
     if (activeTool === 'draw') {
@@ -2969,15 +2781,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (activeTool === 'spline') {
-      timelineBeforeMutate('copy');
       handleSplineMouseDown(e);
       return;
     }
 
-    if (activeTool === 'ellipse') { 
-      timelineBeforeMutate('copy'); 
-      handleEllipseStart(e); 
-      return; 
+    if (activeTool === 'ellipse') {
+      handleEllipseStart(e);
+      return;
     }
   });
 
@@ -2989,8 +2799,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   svg.addEventListener('pointerup', e => {
-    timelineAfterMutate();
-
     draggingAnchor = null;
     draggingPath = null;
     activeHandle = null;
@@ -4471,8 +4279,6 @@ function drawControlPoints(path) {
       draggingPath = path;
       activeAnchorIndex = idx;
 
-      timelineBeforeMutate('copy');
-
       const ptData = path.__points[idx];
 
       // ✅ store start in LOCAL coords, and also store mouse in LOCAL coords
@@ -4599,8 +4405,6 @@ function drawEllipseControls(path) {
       draggingPath = path;
       draggingAnchor = `ellipse-${kind}`;
       activeControlPoint = c;
-
-      timelineBeforeMutate('copy');
 
       const worldMouse = getSVGPoint(e);
       const localMouse = worldToLocal(path, worldMouse.x, worldMouse.y);
@@ -4792,8 +4596,6 @@ function enableBezierHandleDrag(handleEl) {
 
     draggingPath = path; // ✅ required (your pointermove guard uses this)
 
-    timelineBeforeMutate('copy');
-
     // Make sure model exists (and is cubic now)
     ensurePointsModel(path);
 
@@ -4959,7 +4761,6 @@ window.addEventListener('mousemove', e => {
 
   /*--------------- Left toolbar -----------------*/
   if (activeTool === 'draw') {
-    timelineBeforeMutate('copy');
     handleDrawMove(e);
   }
 
@@ -5388,14 +5189,8 @@ function createTimelineLayer(name) {
 
   // make it active
   selectTimelineLayer(layerId);
-  renderFrame(currentFrame);
 
   syncTimelineLayerRenderOrder();
-
-  ensureTimelineLayerState(layerId);
-  ensureKeyframe(layerId, 1, 'blank');  // frame 1 starts as a keyframe
-  updateKeyframeCellUI(layerId, 1);
-  updateHoldsUI(layerId);
 
   return layerId;
 }
@@ -5515,7 +5310,8 @@ timelineFrames.addEventListener('click', (e) => {
   const idx = [...row.children].indexOf(cell);
   if (idx < 0) return;
 
-  setCurrentFrame(idx + 1);
+  currentFrame = idx + 1;
+  updatePlayhead();
 });
 
 function setFrameFromRulerClientX(clientX) {
@@ -5526,7 +5322,8 @@ function setFrameFromRulerClientX(clientX) {
   const x = localX + timelineHScroll.scrollLeft;
 
   const idx = Math.floor(x / frameWidth) + 1;
-  setCurrentFrame(idx);
+  currentFrame = Math.max(1, Math.min(totalFrames, idx));
+  updatePlayhead();
 }
 
 // Click-to-jump + drag-to-scrub
