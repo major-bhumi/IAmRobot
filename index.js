@@ -115,7 +115,8 @@ function newAssetId() {
 function setLibrarySelection(assetId) {
   selectedLibraryAssetId = assetId;
   libraryHasFocus = true;
-  updateLayersPanel(); // refresh highlight in UI
+  updateLayersPanel();      // keep your highlight behavior
+  updateLibraryPreview();   // ✅ add this
 }
 
 /* ----------------------------------------------------------------------------- */
@@ -137,6 +138,9 @@ function clearLibraryPreview() {
 }
 
 function updateLibraryPreview() {
+  // guard: if preview DOM missing, do nothing (prevents crashes)
+  if (!previewImg || !previewSvg || !previewLabel) return;
+
   const id = selectedLibraryAssetId;
   if (!id || !libraryAssets.has(id)) {
     clearLibraryPreview();
@@ -145,59 +149,18 @@ function updateLibraryPreview() {
 
   const asset = libraryAssets.get(id);
 
-  // Label (Flash-like: always shows what’s selected in the library)
-  previewLabel.textContent = `${asset.name || "Untitled"}  •  ${asset.type}`;
+  // Your assets look like { name, href, w, h } right now:
+  const href = asset.href;      // ✅ use this instead of asset.src
+  const name = asset.name || "Untitled";
 
-  if (asset.type === "image") {
-    // Show <img>
-    previewSvg.style.display = "none";
-    while (previewSvg.firstChild) previewSvg.removeChild(previewSvg.firstChild);
+  previewLabel.textContent = name;
 
-    previewImg.style.display = "block";
-    previewImg.src = asset.src; // dataURL or blob URL
-    return;
-  }
+  // Image preview
+  previewSvg.style.display = "none";
+  while (previewSvg.firstChild) previewSvg.removeChild(previewSvg.firstChild);
 
-  if (asset.type === "symbol") {
-    // Show <svg> (clone defs content into preview)
-    previewImg.style.display = "none";
-    previewImg.src = "";
-
-    previewSvg.style.display = "block";
-    while (previewSvg.firstChild) previewSvg.removeChild(previewSvg.firstChild);
-
-    const defEl = document.getElementById(asset.defId);
-    if (!defEl) {
-      previewLabel.textContent = `${asset.name || "Untitled"}  •  symbol (missing def)`;
-      return;
-    }
-
-    const clone = defEl.cloneNode(true);
-    clone.removeAttribute("id");
-    previewSvg.appendChild(clone);
-
-    // Fit viewBox to symbol bounds (after it’s in the DOM)
-    requestAnimationFrame(() => {
-      let bb;
-      try { bb = clone.getBBox(); } catch { bb = null; }
-
-      if (bb && bb.width > 0 && bb.height > 0) {
-        const pad = Math.max(bb.width, bb.height) * 0.10;
-        const x = bb.x - pad;
-        const y = bb.y - pad;
-        const w = bb.width + pad * 2;
-        const h = bb.height + pad * 2;
-        previewSvg.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
-      } else {
-        previewSvg.setAttribute("viewBox", `0 0 100 100`);
-      }
-    });
-
-    return;
-  }
-
-  // Unknown type fallback
-  clearLibraryPreview();
+  previewImg.style.display = "block";
+  previewImg.src = href || "";
 }
 
 function selectLibraryAsset(id) {
@@ -231,6 +194,128 @@ function openContextMenu(x, y) {
 
 function closeContextMenu() {
   contextMenu.classList.add('hidden');
+}
+
+/* ----------------------------------------------------------------------------- */
+/* ---------------------- Library asset right-click menu ------------------------ */
+/* ----------------------------------------------------------------------------- */
+
+let libMenuEl = null;
+let libMenuAssetId = null;
+
+function ensureLibMenu() {
+  if (libMenuEl) return libMenuEl;
+
+  libMenuEl = document.createElement('div');
+  libMenuEl.id = 'libraryContextMenu';
+  libMenuEl.style.position = 'fixed';
+  libMenuEl.style.zIndex = '999999';
+  libMenuEl.style.minWidth = '160px';
+  libMenuEl.style.padding = '6px';
+  libMenuEl.style.borderRadius = '8px';
+  libMenuEl.style.border = '1px solid rgba(255,255,255,0.12)';
+  libMenuEl.style.background = 'rgba(20,20,20,0.95)';
+  libMenuEl.style.backdropFilter = 'blur(6px)';
+  libMenuEl.style.boxShadow = '0 8px 24px rgba(0,0,0,0.35)';
+  libMenuEl.style.display = 'none';
+
+  libMenuEl.innerHTML = `
+    <div class="libctx-item" data-act="rename" style="padding:8px 10px;border-radius:6px;cursor:pointer;color:white;">Rename</div>
+    <div class="libctx-item" data-act="delete" style="padding:8px 10px;border-radius:6px;cursor:pointer;color:#ff6b6b;color:white;">Delete</div>
+  `;
+
+  // hover effect (no CSS needed)
+  libMenuEl.addEventListener('mouseover', (e) => {
+    const it = e.target.closest('.libctx-item');
+    if (it) it.style.background = 'rgba(255,255,255,0.08)';
+  });
+  libMenuEl.addEventListener('mouseout', (e) => {
+    const it = e.target.closest('.libctx-item');
+    if (it) it.style.background = 'transparent';
+  });
+
+  libMenuEl.addEventListener('mousedown', (e) => {
+    // prevent menu click from closing immediately via document handler
+    e.stopPropagation();
+  });
+
+  libMenuEl.addEventListener('click', (e) => {
+    const item = e.target.closest('.libctx-item');
+    if (!item) return;
+
+    const act = item.dataset.act;
+    const assetId = libMenuAssetId;
+
+    hideLibMenu();
+
+    if (!assetId) return;
+
+    if (act === 'rename') {
+      beginLibraryInlineRename(assetId);
+    }
+
+    if (act === 'delete') {
+      deleteLibraryAsset(assetId);
+      updateLibraryPreview?.();
+    }
+  });
+
+  document.body.appendChild(libMenuEl);
+
+  // close on outside click / escape / scroll / resize
+  document.addEventListener('mousedown', () => hideLibMenu());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideLibMenu(); }, true);
+  window.addEventListener('scroll', hideLibMenu, true);
+  window.addEventListener('resize', hideLibMenu);
+
+  return libMenuEl;
+}
+
+function showLibMenu(x, y, assetId) {
+  const m = ensureLibMenu();
+  libMenuAssetId = assetId;
+
+  m.style.display = 'block';
+
+  // keep inside viewport
+  const pad = 6;
+  const rect = m.getBoundingClientRect();
+  const maxX = window.innerWidth - rect.width - pad;
+  const maxY = window.innerHeight - rect.height - pad;
+
+  m.style.left = Math.max(pad, Math.min(x, maxX)) + 'px';
+  m.style.top  = Math.max(pad, Math.min(y, maxY)) + 'px';
+}
+
+function hideLibMenu() {
+  if (!libMenuEl) return;
+  libMenuEl.style.display = 'none';
+  libMenuAssetId = null;
+}
+
+/** Reuse your existing double-click rename behavior */
+function beginLibraryInlineRename(assetId) {
+  if (!assetId || !libraryAssets.has(assetId)) return;
+
+  // find the name span for this asset
+  const nameEl = document.querySelector(`.layer-name[data-asset-id="${assetId}"]`);
+  if (!nameEl) return;
+
+  const asset = libraryAssets.get(assetId);
+
+  // same behavior you already do on dblclick
+  isRenamingLayer = true;
+
+  nameEl.textContent = asset.name || '';
+  nameEl.contentEditable = 'true';
+  nameEl.classList.add('editing');
+  nameEl.focus();
+
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  const range = document.createRange();
+  range.selectNodeContents(nameEl);
+  sel.addRange(range);
 }
 
 /* ----------------------------------------------------------------------------- */
@@ -2120,6 +2205,7 @@ function handleRectangleEnd(e) {
 
 function handleTransformStart(e) {
   if (activeTool !== 'transform') return;
+  if (e.button !== 0) return; // ✅ left only
 
   // get actual drawable element inside timeline groups
   const hit = e.target.closest('#contentLayer g[data-tl] > *');
@@ -2244,6 +2330,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }*/
 
   svg.addEventListener('mousedown', e => {
+    // ✅ Only LEFT click manipulates objects/tools.
+    // Middle = camera pan, Right = context menu (no transforms)
+    if (e.button !== 0) return;
+
     const handle = e.target.closest('.handle-rect');
     const rectGroup = e.target.closest('.selection-rect-group');
     const editLayerTarget = e.target.closest('#editLayer');
@@ -3386,6 +3476,7 @@ function updateLayersPanel() {
     const name = document.createElement('span');
     name.className = 'layer-name';
     name.textContent = asset.name || '(unnamed)';
+    name.dataset.assetId = assetId; // ✅ add this
 
     row.appendChild(name);
     item.appendChild(row);
@@ -3400,10 +3491,19 @@ function updateLayersPanel() {
 
     // ✅ make draggable for drag-drop to stage
     item.draggable = true;
+
     item.addEventListener('dragstart', (e) => {
       libraryHasFocus = true;
       e.dataTransfer.setData('text/asset-id', assetId);
       e.dataTransfer.effectAllowed = 'copy';
+    });
+
+    item.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();      // ✅ prevents your document-level contextmenu handler
+      setLibrarySelection(assetId);
+      updateLibraryPreview?.();
+      showLibMenu(e.clientX, e.clientY, assetId);
     });
 
     // ✅ rename asset
@@ -4471,6 +4571,19 @@ function updatePlayhead() {
   playhead.style.left = `${x}px`;
 }
 
+function syncTimelineLayerRenderOrder() {
+  // UI order: top -> bottom
+  const ui = [...timelineLayers.querySelectorAll('.timeline-layer[data-layer-id]')];
+
+  // SVG must be bottom -> top so top layer draws on top
+  const idsBottomToTop = ui.map(el => el.dataset.layerId).reverse();
+
+  for (const id of idsBottomToTop) {
+    const g = contentLayer.querySelector(`g[data-tl="${id}"]`);
+    if (g) contentLayer.appendChild(g); // move to end = above others
+  }
+}
+
 // Creates (or returns) the SVG group for a timeline layer
 function ensureTimelineSVGGroup(layerId) {
   let g = contentLayer.querySelector(`g[data-tl="${layerId}"]`);
@@ -4478,6 +4591,7 @@ function ensureTimelineSVGGroup(layerId) {
     g = document.createElementNS(NS, 'g');
     g.dataset.tl = layerId;
     contentLayer.appendChild(g);
+    syncTimelineLayerRenderOrder(); // ✅ IMPORTANT
   }
   return g;
 }
@@ -4587,6 +4701,8 @@ function createTimelineLayer(name) {
   // make it active
   selectTimelineLayer(layerId);
 
+  syncTimelineLayerRenderOrder();
+
   return layerId;
 }
 
@@ -4630,6 +4746,8 @@ function removeTimelineLayer(layerId = activeTimelineLayerId) {
   // update active selection
   activeTimelineLayerId = null;
   if (nextId) selectTimelineLayer(nextId);
+
+  syncTimelineLayerRenderOrder();
 }
 
 function getActiveLayerGroup() {
