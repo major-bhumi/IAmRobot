@@ -948,6 +948,125 @@ function refreshAfterHistory() {
   drawSelectionBoxes();
 }
 
+// -------------------- Spline tool state --------------------
+let splineActive = false;
+let splinePoints = [];
+let splinePathEl = null;
+let splinePreview = null; // {x,y} world
+
+function buildPolylineD(points, previewPt = null) {
+  if (!points.length) return '';
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 1; i < points.length; i++) d += ` L ${points[i].x} ${points[i].y}`;
+  if (previewPt) d += ` L ${previewPt.x} ${previewPt.y}`;
+  return d;
+}
+
+function startSpline(worldPt) {
+  splineActive = true;
+  splinePoints = [worldPt];
+  splinePreview = null;
+
+  splinePathEl = document.createElementNS(NS, 'path');
+  splinePathEl.setAttribute('fill', 'none');
+  splinePathEl.setAttribute('stroke', '#fff');      // or your current stroke
+  splinePathEl.setAttribute('stroke-width', '2');   // or your current width
+  splinePathEl.__isLayer = false;                   // temp
+  editLayer.appendChild(splinePathEl);
+
+  splinePathEl.setAttribute('d', buildPolylineD(splinePoints));
+}
+
+function cancelSpline() {
+  splineActive = false;
+  splinePoints = [];
+  splinePreview = null;
+  if (splinePathEl) splinePathEl.remove();
+  splinePathEl = null;
+}
+
+function commitSpline(closed = false) {
+  if (!splinePathEl) return;
+
+  // rules you requested
+  if (splinePoints.length <= 1) {
+    cancelSpline();
+    return;
+  }
+
+  snapshotDocHistory(); // commit-only (good for performance)
+
+  const d = buildPolylineD(splinePoints) + (closed ? ' Z' : '');
+  splinePathEl.setAttribute('d', d);
+
+  // move to active timeline layer
+  const g = getActiveLayerGroup(); // must return <g data-tl="...">
+  g.appendChild(splinePathEl);
+
+  splinePathEl.__isLayer = true; // if you use this flag
+  splinePathEl = null;
+  splineActive = false;
+  splinePoints = [];
+  splinePreview = null;
+
+  // optional: auto-select the new path
+  // selectElement(lastCreatedPath)
+}
+
+function addSplinePoint(worldPt) {
+  splinePoints.push(worldPt);
+  splinePathEl.setAttribute('d', buildPolylineD(splinePoints, splinePreview));
+}
+
+function isCloseToFirst(worldPt) {
+  if (splinePoints.length < 2) return false;
+  const p0 = splinePoints[0];
+  const dx = worldPt.x - p0.x;
+  const dy = worldPt.y - p0.y;
+
+  const threshold = 8 / camScale; // tweak feel
+  return (dx*dx + dy*dy) <= (threshold * threshold);
+}
+
+// -------------------- Events --------------------
+function handleSplineMouseDown(e) {
+  const pt = getSVGPoint(e); // world
+  if (!splineActive) {
+    startSpline(pt);
+    return;
+  }
+
+  // click first anchor to close
+  if (isCloseToFirst(pt)) {
+    commitSpline(true);
+    return;
+  }
+
+  addSplinePoint(pt);
+}
+
+function handleSplineMouseMove(e) {
+  if (!splineActive || !splinePathEl) return;
+  splinePreview = getSVGPoint(e);
+  splinePathEl.setAttribute('d', buildPolylineD(splinePoints, splinePreview));
+}
+
+window.addEventListener('keydown', (e) => {
+  if (activeTool !== 'spline') return;
+
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    // if only one anchor: remove it (cancel)
+    // if two anchors: makes a straight line (commit open)
+    commitSpline(false);
+  }
+
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    cancelSpline();
+  }
+});
+
 /*-----------------------------------------------------------*/
 function getLocalDOMMatrix(el) {
   const base = el.transform.baseVal.consolidate();
@@ -2415,10 +2534,16 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    if (activeTool === 'spline') handleSplineMouseDown(e);
+
     if (activeTool === 'ellipse') {
       handleEllipseStart(e);
       return;
     }
+  });
+
+  svg.addEventListener('mousemove', e => {
+    if (activeTool === 'spline') handleSplineMouseMove(e);
   });
 
   svg.addEventListener('pointerup', e => {
