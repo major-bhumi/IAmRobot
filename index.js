@@ -119,6 +119,108 @@ function setLibrarySelection(assetId) {
 }
 
 /* ----------------------------------------------------------------------------- */
+/* -------------------------------- Library preview ---------------------------- */
+/* ----------------------------------------------------------------------------- */
+const previewImg = document.getElementById('libraryPreviewImg');
+const previewSvg = document.getElementById('libraryPreviewSvg');
+const previewLabel = document.getElementById('libraryPreviewLabel');
+
+function clearLibraryPreview() {
+  previewImg.src = "";
+  previewImg.style.display = "none";
+
+  while (previewSvg.firstChild) previewSvg.removeChild(previewSvg.firstChild);
+  previewSvg.style.display = "none";
+  previewSvg.removeAttribute("viewBox");
+
+  previewLabel.textContent = "No asset selected";
+}
+
+function updateLibraryPreview() {
+  const id = selectedLibraryAssetId;
+  if (!id || !libraryAssets.has(id)) {
+    clearLibraryPreview();
+    return;
+  }
+
+  const asset = libraryAssets.get(id);
+
+  // Label (Flash-like: always shows what’s selected in the library)
+  previewLabel.textContent = `${asset.name || "Untitled"}  •  ${asset.type}`;
+
+  if (asset.type === "image") {
+    // Show <img>
+    previewSvg.style.display = "none";
+    while (previewSvg.firstChild) previewSvg.removeChild(previewSvg.firstChild);
+
+    previewImg.style.display = "block";
+    previewImg.src = asset.src; // dataURL or blob URL
+    return;
+  }
+
+  if (asset.type === "symbol") {
+    // Show <svg> (clone defs content into preview)
+    previewImg.style.display = "none";
+    previewImg.src = "";
+
+    previewSvg.style.display = "block";
+    while (previewSvg.firstChild) previewSvg.removeChild(previewSvg.firstChild);
+
+    const defEl = document.getElementById(asset.defId);
+    if (!defEl) {
+      previewLabel.textContent = `${asset.name || "Untitled"}  •  symbol (missing def)`;
+      return;
+    }
+
+    const clone = defEl.cloneNode(true);
+    clone.removeAttribute("id");
+    previewSvg.appendChild(clone);
+
+    // Fit viewBox to symbol bounds (after it’s in the DOM)
+    requestAnimationFrame(() => {
+      let bb;
+      try { bb = clone.getBBox(); } catch { bb = null; }
+
+      if (bb && bb.width > 0 && bb.height > 0) {
+        const pad = Math.max(bb.width, bb.height) * 0.10;
+        const x = bb.x - pad;
+        const y = bb.y - pad;
+        const w = bb.width + pad * 2;
+        const h = bb.height + pad * 2;
+        previewSvg.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
+      } else {
+        previewSvg.setAttribute("viewBox", `0 0 100 100`);
+      }
+    });
+
+    return;
+  }
+
+  // Unknown type fallback
+  clearLibraryPreview();
+}
+
+function selectLibraryAsset(id) {
+  selectedLibraryAssetId = id;
+  libraryHasFocus = true; // keep your current behavior
+  updateLibraryUISelection(); // whatever you already do
+  updateLibraryPreview();
+}
+
+function deleteLibraryAsset(assetId) {
+  // ...your existing "delete all instances" logic...
+
+  libraryAssets.delete(assetId);
+
+  if (selectedLibraryAssetId === assetId) {
+    selectedLibraryAssetId = null;
+    updateLibraryPreview();
+  }
+
+  renderLibraryList(); // whatever you use
+}
+
+/* ----------------------------------------------------------------------------- */
 /* ---------------------------------- Context menu ----------------------------- */
 /* ----------------------------------------------------------------------------- */
 function openContextMenu(x, y) {
@@ -4678,5 +4780,3 @@ function wireTimelineHorizontalScroll() {
   applyTimelineScrollX(timelineHScroll.scrollLeft);
   updatePlayhead();
 }
-
-
