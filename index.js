@@ -969,7 +969,7 @@ function startSpline(worldPt) {
 
   splinePathEl = document.createElementNS(NS, 'path');
   splinePathEl.setAttribute('fill', 'none');
-  splinePathEl.setAttribute('stroke', '#fff');      // or your current stroke
+  splinePathEl.setAttribute('stroke', '#000');      // or your current stroke
   splinePathEl.setAttribute('stroke-width', '2');   // or your current width
   splinePathEl.__isLayer = false;                   // temp
   editLayer.appendChild(splinePathEl);
@@ -2534,7 +2534,10 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    if (activeTool === 'spline') handleSplineMouseDown(e);
+    if (activeTool === 'spline') {
+      handleSplineMouseDown(e);
+      return;
+    }
 
     if (activeTool === 'ellipse') {
       handleEllipseStart(e);
@@ -2543,7 +2546,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   svg.addEventListener('mousemove', e => {
-    if (activeTool === 'spline') handleSplineMouseMove(e);
+    if (activeTool === 'spline') {
+      handleSplineMouseMove(e);
+      return;
+    }
   });
 
   svg.addEventListener('pointerup', e => {
