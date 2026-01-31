@@ -948,16 +948,8 @@ function refreshAfterHistory() {
   drawSelectionBoxes();
 }
 
-// ------------------------------------------------------------------------ //
-// --------------------------- Spline tool state -------------------------- //
-// ------------------------------------------------------------------------ //
+// -------------------- Spline tool state --------------------
 let splineActive = false;
-
-// Commands model: first point is MoveTo, then each segment is L or Q.
-// Example: M p0, then {type:'L', x,y} or {type:'Q', cx,cy, x,y}
-let splineCmds = [];
-let splineMouseDown = false;
-let splineLastCmdIndex = -1;  // last added segment index in splineCmds (>=1)
 let splinePoints = [];
 let splinePathEl = null;
 let splinePreview = null; // {x,y} world
@@ -981,27 +973,27 @@ function buildPolylineD(points, previewPt = null) {
 
 function startSpline(worldPt) {
   splineActive = true;
-  splineCmds = [{ type: 'M', x: worldPt.x, y: worldPt.y }];
+  splinePoints = [worldPt];
   splinePreview = null;
 
   splinePathEl = document.createElementNS(NS, 'path');
-  splinePathEl.setAttribute('fill', 'none');
-  splinePathEl.setAttribute('stroke', '#000');     // black
-  splinePathEl.setAttribute('stroke-width', '2');
-  splinePathEl.setAttribute('pointer-events', 'none'); // keep as you already did
+  splinePathEl.setAttribute('fill', 'transparent');
+  splinePathEl.setAttribute('fill-opacity', '0');
+  splinePathEl.setAttribute('pointer-events', 'none'); // ✅ add this
+  splinePathEl.setAttribute('stroke', '#000');      // or your current stroke
+  splinePathEl.setAttribute('stroke-width', '2');   // or your current width
+  splinePathEl.__isLayer = false;                   // temp
   editLayer.appendChild(splinePathEl);
 
-  splinePathEl.setAttribute('d', buildSplineD(splineCmds));
-  updateSplineDots(null); // uses anchors; see dot patch below
+  splinePathEl.setAttribute('d', buildPolylineD(splinePoints));
+
+  updateSplineDots(null);
 }
 
 function cancelSpline() {
   splineActive = false;
-  splineCmds = [];
+  splinePoints = [];
   splinePreview = null;
-  splineMouseDown = false;
-  splineLastCmdIndex = -1;
-
   if (splinePathEl) splinePathEl.remove();
   splinePathEl = null;
 
@@ -1011,67 +1003,53 @@ function cancelSpline() {
 function commitSpline(closed = false) {
   if (!splinePathEl) return;
 
-  // anchors count = commands count (M + segments endpoints)
-  const anchors = getSplineAnchors();
-  if (anchors.length <= 1) { // only one anchor
+  // rules you requested
+  if (splinePoints.length <= 1) {
     cancelSpline();
     return;
   }
 
-  snapshotDocHistory();
+  snapshotDocHistory(); // commit-only (good for performance)
 
-  const d = buildSplineD(splineCmds) + (closed ? ' Z' : '');
+  const d = buildPolylineD(splinePoints) + (closed ? ' Z' : '');
   splinePathEl.setAttribute('d', d);
-
-  // clickable interior for closed shapes (you already did this and liked it)
-  if (closed) {
-    splinePathEl.setAttribute('fill', 'transparent');
-    splinePathEl.setAttribute('fill-opacity', '0');
-  } else {
-    splinePathEl.setAttribute('fill', 'none');
-  }
-
-  // make selectable now
-  splinePathEl.removeAttribute('pointer-events');
+  // ✅ make it selectable/transformable after commit
+  splinePathEl.removeAttribute('pointer-events');      // or: setAttribute('pointer-events','visiblePainted')
   splinePathEl.style.pointerEvents = 'auto';
 
-  setIsLayer(splinePathEl, true);
-  applyNonScalingStroke(splinePathEl);
-  ensureUID(splinePathEl);
+  // ✅ mark it as a real content element (so it behaves like other drawn stuff)
+  setIsLayer(splinePathEl, true);          // use your helper so it survives restore
+  applyNonScalingStroke(splinePathEl);     // if you use this for other strokes
+  ensureUID(splinePathEl);                 // so selection/undo tracking stays consistent (optional but good)
 
-  const g = getActiveLayerGroup();
+  // move to active timeline layer
+  const g = getActiveLayerGroup(); // must return <g data-tl="...">
   g.appendChild(splinePathEl);
 
-  // optional (recommended): jump back to select & select it
-  activeTool = 'select';
-  selectElement(splinePathEl);
-
+  splinePathEl.__isLayer = true; // if you use this flag
   splinePathEl = null;
   splineActive = false;
-  splineCmds = [];
+  splinePoints = [];
   splinePreview = null;
-  splineMouseDown = false;
-  splineLastCmdIndex = -1;
 
+  // optional: auto-select the new path
+  // selectElement(lastCreatedPath)
   clearSplineDots();
 }
 
 function addSplinePoint(worldPt) {
-  splineCmds.push({ type: 'L', x: worldPt.x, y: worldPt.y });
-  splineLastCmdIndex = splineCmds.length - 1;
-
-  splinePathEl.setAttribute('d', buildSplineD(splineCmds, splinePreview));
+  splinePoints.push(worldPt);
+  splinePathEl.setAttribute('d', buildPolylineD(splinePoints, splinePreview));
   updateSplineDots(splinePreview);
 }
 
 function isCloseToFirst(worldPt) {
-  const anchors = getSplineAnchors();
-  if (anchors.length < 2) return false;
-
-  const p0 = anchors[0];
-  const threshold = 8 / camScale;
+  if (splinePoints.length < 2) return false;
+  const p0 = splinePoints[0];
   const dx = worldPt.x - p0.x;
   const dy = worldPt.y - p0.y;
+
+  const threshold = 8 / camScale; // tweak feel
   return (dx*dx + dy*dy) <= (threshold * threshold);
 }
 
@@ -1153,88 +1131,28 @@ function clearSplineDots() {
   splineEndDot = null;
 }
 
-function getSplineAnchors() {
-  if (!splineCmds.length) return [];
-  const anchors = [{ x: splineCmds[0].x, y: splineCmds[0].y }]; // M
-  for (let i = 1; i < splineCmds.length; i++) {
-    anchors.push({ x: splineCmds[i].x, y: splineCmds[i].y });
-  }
-  return anchors;
-}
-
-function buildSplineD(cmds, previewPt = null) {
-  if (!cmds.length) return '';
-
-  let d = `M ${cmds[0].x} ${cmds[0].y}`;
-
-  for (let i = 1; i < cmds.length; i++) {
-    const c = cmds[i];
-    if (c.type === 'Q') d += ` Q ${c.cx} ${c.cy} ${c.x} ${c.y}`;
-    else d += ` L ${c.x} ${c.y}`;
-  }
-
-  // rubber band preview (only if not currently dragging a handle)
-  if (previewPt && !splineMouseDown) {
-    d += ` L ${previewPt.x} ${previewPt.y}`;
-  }
-
-  return d;
-}
-
-function dist2(a, b) {
-  const dx = a.x - b.x, dy = a.y - b.y;
-  return dx*dx + dy*dy;
-}
-
-// ------------------------------------------------------------------------ //
-// -------------------------------- Events -------------------------------- //
-// ------------------------------------------------------------------------ //
+// -------------------- Events --------------------
 function handleSplineMouseDown(e) {
   const pt = getSVGPoint(e); // world
-
   if (!splineActive) {
     startSpline(pt);
     return;
   }
 
-  // close if clicking near first anchor (only after 2+ anchors)
+  // click first anchor to close
   if (isCloseToFirst(pt)) {
     commitSpline(true);
     return;
   }
 
-  // add new anchor; dragging after this will convert it to Q
   addSplinePoint(pt);
-  splineMouseDown = true;
 }
 
 function handleSplineMouseMove(e) {
   if (!splineActive || !splinePathEl) return;
-
   splinePreview = getSVGPoint(e);
-
-  // If user is holding mouse down after placing the last anchor,
-  // turn the last segment into a Q and move its control point with the mouse.
-  if (splineMouseDown && splineLastCmdIndex >= 1) {
-    const last = splineCmds[splineLastCmdIndex];
-
-    // Only convert to Q if the mouse moved a little (prevents accidental curves)
-    const anchor = { x: last.x, y: last.y };
-    const threshold = 6 / camScale;
-    if (dist2(splinePreview, anchor) > threshold * threshold) {
-      last.type = 'Q';
-      last.cx = splinePreview.x;
-      last.cy = splinePreview.y;
-    }
-  }
-
-  splinePathEl.setAttribute('d', buildSplineD(splineCmds, splinePreview));
+  splinePathEl.setAttribute('d', buildPolylineD(splinePoints, splinePreview));
   updateSplineDots(splinePreview);
-}
-
-function handleSplineMouseUp(e) {
-  if (!splineActive) return;
-  splineMouseDown = false;
 }
 
 window.addEventListener('keydown', (e) => {
@@ -2738,10 +2656,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  svg.addEventListener('mouseup', e => {
-    if (activeTool === 'spline') handleSplineMouseUp(e);
-  });
-
   svg.addEventListener('pointerup', e => {
     draggingAnchor = null;
     draggingPath = null;
@@ -4124,7 +4038,9 @@ function drawControlPoints(path) {
   const pts = path.__points || [];
 
   // Build anchor list from __points (local)
-  const anchors = getSplineAnchors();
+  const anchors = pts
+    .filter(p => p.type === 'M' || p.type === 'L' || p.type === 'Q')
+    .map(p => ({ x: p.x, y: p.y }));
 
   anchors.forEach((pt, index) => {
     const w = localToWorld(path, pt.x, pt.y);
