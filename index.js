@@ -495,7 +495,7 @@ function ensurePointsModel(path, forceRebuild = false) {
   const d = path.getAttribute('d') || '';
   path.__closed = /[zZ]\s*$/.test(d.trim());
 
-  const commands = d.match(/[MLQ][^MLQ]*/g) || [];
+  const commands = d.match(/[MLQC][^MLQC]*/g) || [];
 
   const pts = [];
 
@@ -517,6 +517,13 @@ function ensurePointsModel(path, forceRebuild = false) {
         cy: nums[1],
         x: nums[2],
         y: nums[3]
+      });
+    } else if (type === 'C') {
+      pts.push({
+        type,
+        c1x: nums[0], c1y: nums[1],
+        c2x: nums[2], c2y: nums[3],
+        x: nums[4],  y: nums[5]
       });
     }
   });
@@ -971,6 +978,29 @@ function buildPolylineD(points, previewPt = null) {
   return d;
 }
 
+function buildCubicFromAnchors(points) {
+  if (!points || points.length < 2) return { d: '', model: [] };
+
+  let d = `M ${points[0].x} ${points[0].y}`;
+  const model = [{ type: 'M', x: points[0].x, y: points[0].y }];
+
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+
+    // default straight-line handles (1/3 and 2/3)
+    const c1x = a.x + (b.x - a.x) / 3;
+    const c1y = a.y + (b.y - a.y) / 3;
+    const c2x = a.x + 2 * (b.x - a.x) / 3;
+    const c2y = a.y + 2 * (b.y - a.y) / 3;
+
+    d += ` C ${c1x} ${c1y} ${c2x} ${c2y} ${b.x} ${b.y}`;
+    model.push({ type: 'C', c1x, c1y, c2x, c2y, x: b.x, y: b.y });
+  }
+
+  return { d, model };
+}
+
 function startSpline(worldPt) {
   splineActive = true;
   splinePoints = [worldPt];
@@ -1011,8 +1041,12 @@ function commitSpline(closed = false) {
 
   snapshotDocHistory(); // commit-only (good for performance)
 
-  const d = buildPolylineD(splinePoints) + (closed ? ' Z' : '');
-  splinePathEl.setAttribute('d', d);
+  const built = buildCubicFromAnchors(splinePoints);
+  splinePathEl.setAttribute('d', built.d + (closed ? ' Z' : ''));
+
+  // store editable model immediately (so edit tool shows handles right away)
+  splinePathEl.__points = built.model;
+  splinePathEl.__closed = !!closed;
   // ✅ make it selectable/transformable after commit
   splinePathEl.removeAttribute('pointer-events');      // or: setAttribute('pointer-events','visiblePainted')
   splinePathEl.style.pointerEvents = 'auto';
@@ -2750,8 +2784,19 @@ document.addEventListener('DOMContentLoaded', () => {
       const dx = localMouse.x - start.mouseLocalX;
       const dy = localMouse.y - start.mouseLocalY;
 
-      pt.cx = start.cx + dx;
-      pt.cy = start.cy + dy;
+      if (pt.type === 'C') {
+        if (activeHandle.kind === 'c1') {
+          pt.c1x = start.cx + dx;
+          pt.c1y = start.cy + dy;
+        } else {
+          pt.c2x = start.cx + dx;
+          pt.c2y = start.cy + dy;
+        }
+      } else {
+        // quadratic (existing)
+        pt.cx = start.cx + dx;
+        pt.cy = start.cy + dy;
+      }
 
       rebuildPathFromPoints(activeHandle.path);
       clearControlPoints();
@@ -3849,6 +3894,43 @@ function getQuadraticHandlesFromPath(path) {
     .filter(Boolean);
 }
 
+function getCubicHandlesFromPath(path) {
+  ensurePointsModel(path);
+
+  const pts = path.__points;
+  if (!pts || pts.length < 2) return [];
+
+  const out = [];
+  let prev = pts[0]; // M
+
+  for (let i = 1; i < pts.length; i++) {
+    const p = pts[i];
+
+    if (p.type === 'C') {
+      // handle 1 is anchored at PREVIOUS anchor
+      out.push({
+        kind: 'c1',
+        pointIndex: i,
+        x: prev.x, y: prev.y,
+        cx: p.c1x, cy: p.c1y
+      });
+
+      // handle 2 is anchored at CURRENT anchor
+      out.push({
+        kind: 'c2',
+        pointIndex: i,
+        x: p.x, y: p.y,
+        cx: p.c2x, cy: p.c2y
+      });
+    }
+
+    // advance "prev anchor"
+    prev = p;
+  }
+
+  return out;
+}
+
 function rebuildPathFromPoints(path) {
   // ✅ never rebuild ellipse from __points (it uses A arcs)
   if (path.__shape === 'ellipse') return;
@@ -3862,6 +3944,7 @@ function rebuildPathFromPoints(path) {
     if (p.type === 'M') d += `M ${p.x} ${p.y}`;
     if (p.type === 'L') d += ` L ${p.x} ${p.y}`;
     if (p.type === 'Q') d += ` Q ${p.cx} ${p.cy} ${p.x} ${p.y}`;
+    if (p.type === 'C') d += ` C ${p.c1x} ${p.c1y} ${p.c2x} ${p.c2y} ${p.x} ${p.y}`;
   });
 
   // ✅ keep closed shapes closed (rect path uses Z)
@@ -4039,8 +4122,8 @@ function drawControlPoints(path) {
 
   // Build anchor list from __points (local)
   const anchors = pts
-    .filter(p => p.type === 'M' || p.type === 'L' || p.type === 'Q')
-    .map(p => ({ x: p.x, y: p.y }));
+    .map((p, pointIndex) => ({ pointIndex, type: p.type, x: p.x, y: p.y }))
+    .filter(p => p.type === 'M' || p.type === 'L' || p.type === 'Q' || p.type === 'C');
 
   anchors.forEach((pt, index) => {
     const w = localToWorld(path, pt.x, pt.y);
@@ -4054,16 +4137,16 @@ function drawControlPoints(path) {
     // ✅ stroke doesn't scale
     uiNonScaling(c);
 
-    if (path === selectedAnchorPath && index === selectedAnchorIndex) {
+    if (path === selectedAnchorPath && pt.pointIndex === selectedAnchorIndex) {
       c.style.fill = '#007aff';
     }
 
-    c.dataset.index = index;
+    c.dataset.pointIndex = String(pt.pointIndex);
     c.__path = path;
 
     c.addEventListener('pointerdown', e => {
       e.stopPropagation();
-      const idx = Number(c.dataset.index);
+      const idx = parseInt(c.dataset.pointIndex, 10);
 
       if (activeTool === 'delete-anchor') {
         snapshotAnchorHistory();
@@ -4138,6 +4221,38 @@ function drawControlPoints(path) {
     point.__handleTarget = handle;           // local data snapshot from parser
     point.__pathTarget = path;
     point.__pointIndex = qPointIndices[qIndex];
+
+    enableBezierHandleDrag(point);
+    editLayer.appendChild(point);
+  });
+
+  const cubicHandles = getCubicHandlesFromPath(path);
+
+  cubicHandles.forEach((handle) => {
+    const wAnchor = localToWorld(path, handle.x, handle.y);
+    const wCtrl   = localToWorld(path, handle.cx, handle.cy);
+
+    const line = document.createElementNS(NS, 'line');
+    line.setAttribute('x1', wAnchor.x);
+    line.setAttribute('y1', wAnchor.y);
+    line.setAttribute('x2', wCtrl.x);
+    line.setAttribute('y2', wCtrl.y);
+    line.classList.add('bezier-handle-line');
+    uiNonScaling(line);
+    editLayer.appendChild(line);
+
+    const point = document.createElementNS(NS, 'circle');
+    point.setAttribute('cx', wCtrl.x);
+    point.setAttribute('cy', wCtrl.y);
+    point.setAttribute('r', HANDLE_R_PX * px);
+    point.classList.add('bezier-handle');
+    uiNonScaling(point);
+
+    // used by the drag code
+    point.__handleTarget = handle;   // {cx,cy,...}
+    point.__pathTarget   = path;
+    point.__pointIndex   = handle.pointIndex;
+    point.__handleKind   = handle.kind; // 'c1' or 'c2'
 
     enableBezierHandleDrag(point);
     editLayer.appendChild(point);
@@ -4364,12 +4479,29 @@ function enableBezierHandleDrag(handleEl) {
     const worldMouse = getSVGPoint(e);
     const localMouse = worldToLocal(path, worldMouse.x, worldMouse.y);
 
-    handleEl.__start = {
-      cx: path.__points[handleEl.__pointIndex]?.cx ?? handleEl.__handleTarget.cx,
-      cy: path.__points[handleEl.__pointIndex]?.cy ?? handleEl.__handleTarget.cy,
-      mouseLocalX: localMouse.x,
-      mouseLocalY: localMouse.y
-    };
+    handleEl.__start = (function () {
+      const p = path.__points[handleEl.__pointIndex];
+      const kind = handleEl.__handleKind || 'q';
+
+      let cx, cy;
+
+      // Cubic: choose which control point we’re dragging
+      if (p && p.type === 'C') {
+        if (kind === 'c1') { cx = p.c1x; cy = p.c1y; }
+        else              { cx = p.c2x; cy = p.c2y; }
+      } else {
+        // Quadratic (or fallback): single control point
+        cx = (p && p.cx != null) ? p.cx : handleEl.__handleTarget.cx;
+        cy = (p && p.cy != null) ? p.cy : handleEl.__handleTarget.cy;
+      }
+
+      return {
+        cx: cx,
+        cy: cy,
+        mouseLocalX: localMouse.x,
+        mouseLocalY: localMouse.y
+      };
+    })();
 
     draggingAnchor = 'bezier';
     draggingPath = path;
