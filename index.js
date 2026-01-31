@@ -1072,7 +1072,25 @@ function commitSpline(closed = false) {
   snapshotDocHistory(); // commit-only (good for performance)
 
   const built = buildCubicFromAnchors(splinePoints);
-  splinePathEl.setAttribute('d', built.d + (closed ? ' Z' : ''));
+  
+  if (closed) {
+  const p0 = splinePoints[0];
+  const pn = splinePoints[splinePoints.length - 1];
+
+  // straight-line handles for closing segment
+  const c1x = pn.x + (p0.x - pn.x) / 3;
+  const c1y = pn.y + (p0.y - pn.y) / 3;
+  const c2x = pn.x + 2 * (p0.x - pn.x) / 3;
+  const c2y = pn.y + 2 * (p0.y - pn.y) / 3;
+
+  built.d += ` C ${c1x} ${c1y} ${c2x} ${c2y} ${p0.x} ${p0.y}`;
+  built.model.push({ type: 'C', c1x, c1y, c2x, c2y, x: p0.x, y: p0.y });
+}
+
+splinePathEl.setAttribute('d', built.d);
+
+// IMPORTANT: do NOT use Z for spline close, or you lose last handles
+splinePathEl.__closed = false;
 
   // store editable model immediately (so edit tool shows handles right away)
   splinePathEl.__points = built.model;
@@ -4273,14 +4291,10 @@ function drawControlPoints(path) {
     // ✅ stroke doesn't scale (you missed this earlier)
     uiNonScaling(point);
 
-    point.__handleTarget = handle;           // local data snapshot from parser
+    point.__handleTarget = handle;           // {cx,cy,x,y}
     point.__pathTarget = path;
-    point.__pointIndex = qPointIndices[qIndex];
-
-    point.__pointIndex  = handle.pointIndex;
-    point.__handleKind  = handle.kind;                 // "c1" or "c2"
-    point.dataset.kind = handle.kind;
-    point.dataset.pointIndex = String(handle.pointIndex);
+    point.__pointIndex = qPointIndices[qIndex];          // ✅ correct Q index
+    point.dataset.pointIndex = String(qPointIndices[qIndex]); // ✅ optional but good
 
     enableBezierHandleDrag(point);
     editLayer.appendChild(point);
@@ -4313,6 +4327,9 @@ function drawControlPoints(path) {
     point.__pathTarget   = path;
     point.__pointIndex   = handle.pointIndex;
     point.__handleKind   = handle.kind; // 'c1' or 'c2'
+
+    point.dataset.kind = handle.kind;                 // "c1" or "c2"
+    point.dataset.pointIndex = String(handle.pointIndex);
 
     enableBezierHandleDrag(point);
     editLayer.appendChild(point);
@@ -4534,7 +4551,7 @@ function enableBezierHandleDrag(handleEl) {
     e.stopPropagation();
 
     // lock pointer to this handle so it can't "switch" mid-drag
-    try { handleEl.setPointerCapture(e.pointerId); } catch (_) {}
+    try { svg.setPointerCapture(e.pointerId); } catch (_) {}
 
     isHandleDragging = true;
     draggingAnchor = 'bezier';
